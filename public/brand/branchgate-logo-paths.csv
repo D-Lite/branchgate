@@ -1,0 +1,10 @@
+part,x,y,note
+source_top,5,5,incoming branch / PR node
+source_mid,5,12,incoming branch / PR node
+source_bot,5,19,incoming branch / PR node
+merge,14,12,convergence (the gate)
+target,20.25,12,single downstream node
+path_top,"5,5","14,12",curve C9 5 11 12
+path_mid,"5,12","14,12",horizontal
+path_bot,"5,19","14,12",curve C9 19 11 12
+path_out,"14,12","19,12",horizontal to target

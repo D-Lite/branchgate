@@ -1,0 +1,4 @@
+ALTER TABLE pull_requests ADD COLUMN files_changed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pull_requests ADD COLUMN insertions INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pull_requests ADD COLUMN deletions INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pull_requests ADD COLUMN changed_files_json TEXT NOT NULL DEFAULT '[]';

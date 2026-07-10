@@ -1,0 +1,57 @@
+.pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.pipeline-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.pipeline-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pending-pill {
+  font-size: 11px;
+  color: var(--warning);
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+  padding: 2px 8px;
+}
+
+.pipeline-card h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.branch-flow {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.add-pipeline-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 140px;
+  color: var(--fg-muted);
+  border-style: dashed;
+}
+
+.add-icon {
+  font-size: 24px;
+  line-height: 1;
+  color: var(--fg-subtle);
+}

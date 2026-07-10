@@ -1,0 +1,55 @@
+:root {
+  --brand: #fa7315;
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-family: "JetBrains Mono", var(--font-mono);
+}
+
+.brand-lockup-logo {
+  flex-shrink: 0;
+  color: var(--brand);
+}
+
+.brand-lockup-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+
+.brand-lockup-name {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+
+.brand-lockup-version {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-subtle);
+}
+
+.brand-lockup-lg .brand-lockup-name {
+  font-size: 28px;
+  letter-spacing: -0.03em;
+}
+
+.brand-lockup-lg .brand-lockup-logo {
+  width: 26px;
+  height: 26px;
+}
+
+.brand-lockup-lg .brand-lockup-version {
+  font-size: 12px;
+}
+
+.brand-lockup-md .brand-lockup-name {
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}

@@ -1,0 +1,146 @@
+/* Catppuccin — Latte (light) / Mocha (dark) */
+[data-palette="catppuccin"][data-theme="light"] {
+  --bg: #eff1f5;
+  --surface: #ffffff;
+  --surface-2: #e6e9ef;
+  --border: #ccd0da;
+  --border-strong: #acb0be;
+  --fg: #4c4f69;
+  --fg-muted: #6c6f85;
+  --fg-subtle: #9ca0b0;
+  --accent: #1e66f5;
+  --accent-fg: #ffffff;
+  --success: #40a02b;
+  --success-bg: #d8f0d0;
+  --success-border: #a6d89a;
+  --warning: #df8e1d;
+  --warning-bg: #faecd1;
+  --warning-border: #e8c98e;
+  --conflict: #8839ef;
+  --conflict-bg: #ebe0fb;
+  --conflict-border: #cdb4f8;
+  --shadow: 0 1px 3px rgba(76, 79, 105, 0.12);
+  --selection: rgba(30, 102, 245, 0.2);
+}
+
+[data-palette="catppuccin"][data-theme="dark"] {
+  --bg: #1e1e2e;
+  --surface: #181825;
+  --surface-2: #11111b;
+  --border: #313244;
+  --border-strong: #45475a;
+  --fg: #cdd6f4;
+  --fg-muted: #a6adc8;
+  --fg-subtle: #7f849c;
+  --accent: #89b4fa;
+  --accent-fg: #1e1e2e;
+  --success: #a6e3a1;
+  --success-bg: #1e2d22;
+  --success-border: #2f4a36;
+  --warning: #f9e2af;
+  --warning-bg: #2a2418;
+  --warning-border: #4a3d22;
+  --conflict: #cba6f7;
+  --conflict-bg: #241f33;
+  --conflict-border: #3d3357;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  --selection: rgba(137, 180, 250, 0.28);
+}
+
+/* One Dark — light variant + classic dark */
+[data-palette="one-dark"][data-theme="light"] {
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-2: #f0f0f0;
+  --border: #e1e4e8;
+  --border-strong: #c8ccd0;
+  --fg: #383a42;
+  --fg-muted: #6a737d;
+  --fg-subtle: #959da5;
+  --accent: #4078f2;
+  --accent-fg: #ffffff;
+  --success: #50a14f;
+  --success-bg: #e6f4e6;
+  --success-border: #b9ddb8;
+  --warning: #c18401;
+  --warning-bg: #fbf0d9;
+  --warning-border: #e8cf96;
+  --conflict: #a626a4;
+  --conflict-bg: #f3e8f3;
+  --conflict-border: #d9b8d9;
+  --shadow: 0 1px 3px rgba(56, 58, 66, 0.1);
+  --selection: rgba(64, 120, 242, 0.2);
+}
+
+[data-palette="one-dark"][data-theme="dark"] {
+  --bg: #282c34;
+  --surface: #21252b;
+  --surface-2: #1b1f23;
+  --border: #3e4451;
+  --border-strong: #565c64;
+  --fg: #abb2bf;
+  --fg-muted: #828997;
+  --fg-subtle: #5c6370;
+  --accent: #61afef;
+  --accent-fg: #282c34;
+  --success: #98c379;
+  --success-bg: #1f2a1c;
+  --success-border: #334429;
+  --warning: #e5c07b;
+  --warning-bg: #2a2418;
+  --warning-border: #4a3f28;
+  --conflict: #c678dd;
+  --conflict-bg: #2a1f2e;
+  --conflict-border: #4a3357;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  --selection: rgba(97, 175, 239, 0.28);
+}
+
+/* Nord — Snow Storm (light) / Polar Night (dark) */
+[data-palette="nord"][data-theme="light"] {
+  --bg: #eceff4;
+  --surface: #e5e9f0;
+  --surface-2: #d8dee9;
+  --border: #d8dee9;
+  --border-strong: #c5ced9;
+  --fg: #2e3440;
+  --fg-muted: #4c566a;
+  --fg-subtle: #7b88a1;
+  --accent: #5e81ac;
+  --accent-fg: #eceff4;
+  --success: #a3be8c;
+  --success-bg: #e8f0e2;
+  --success-border: #c5d8b5;
+  --warning: #ebcb8b;
+  --warning-bg: #f8f0dd;
+  --warning-border: #e5d4a8;
+  --conflict: #b48ead;
+  --conflict-bg: #f0e6ee;
+  --conflict-border: #d4b8cf;
+  --shadow: 0 1px 3px rgba(46, 52, 64, 0.1);
+  --selection: rgba(94, 129, 172, 0.22);
+}
+
+[data-palette="nord"][data-theme="dark"] {
+  --bg: #2e3440;
+  --surface: #3b4252;
+  --surface-2: #434c5e;
+  --border: #4c566a;
+  --border-strong: #616e88;
+  --fg: #eceff4;
+  --fg-muted: #d8dee9;
+  --fg-subtle: #a7b0c0;
+  --accent: #88c0d0;
+  --accent-fg: #2e3440;
+  --success: #a3be8c;
+  --success-bg: #2e3b2e;
+  --success-border: #3f523f;
+  --warning: #ebcb8b;
+  --warning-bg: #3b3528;
+  --warning-border: #524a35;
+  --conflict: #b48ead;
+  --conflict-bg: #3a2f38;
+  --conflict-border: #524458;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  --selection: rgba(136, 192, 208, 0.28);
+}

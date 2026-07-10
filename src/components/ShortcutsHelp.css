@@ -1,0 +1,67 @@
+.shortcuts-help-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.shortcuts-help {
+  width: min(520px, 100%);
+  max-height: min(80vh, 640px);
+  overflow: auto;
+  padding: 20px;
+}
+
+.shortcuts-help-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.shortcuts-help-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.shortcuts-help-section h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+
+.shortcuts-help-section + .shortcuts-help-section {
+  margin-top: 20px;
+}
+
+.shortcuts-help-list {
+  margin: 0;
+  display: grid;
+  gap: 0;
+}
+
+.shortcuts-help-list div {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.shortcuts-help-list dt {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.shortcuts-help-list dd {
+  margin: 0;
+  color: var(--fg-muted);
+}

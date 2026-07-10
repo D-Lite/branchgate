@@ -1,0 +1,46 @@
+@import "./themes/primer.css";
+@import "./themes/palettes.css";
+
+/* Map Branchgate semantic tokens → GitHub Primer functional tokens */
+[data-palette="github"],
+[data-palette="github-dimmed"],
+[data-palette="github-hc"] {
+  --bg: var(--bgColor-default);
+  --surface: var(--bgColor-muted);
+  --surface-2: var(--bgColor-inset);
+  --border: var(--borderColor-default);
+  --border-strong: var(--borderColor-emphasis);
+  --fg: var(--fgColor-default);
+  --fg-muted: var(--fgColor-muted);
+  --fg-subtle: color-mix(in srgb, var(--fgColor-muted) 72%, var(--fgColor-default));
+  --accent: var(--bgColor-accent-emphasis);
+  --accent-fg: #ffffff;
+  --success: var(--fgColor-success);
+  --success-bg: var(--bgColor-success-muted);
+  --success-border: var(--borderColor-success-muted);
+  --warning: var(--fgColor-attention);
+  --warning-bg: var(--bgColor-attention-muted);
+  --warning-border: var(--borderColor-attention-muted);
+  --conflict: var(--fgColor-done);
+  --conflict-bg: var(--bgColor-done-muted);
+  --conflict-border: var(--borderColor-done-muted);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+  --selection: color-mix(in srgb, var(--bgColor-accent-emphasis) 28%, transparent);
+}
+
+/* Platform-native typography */
+.platform-macos {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
+}
+
+.platform-windows {
+  --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+}
+
+.platform-other {
+  --font-sans: system-ui, sans-serif;
+  --font-mono: ui-monospace, monospace;
+}

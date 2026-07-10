@@ -1,0 +1,5 @@
+@import "@primer/primitives/dist/css/functional/themes/light.css";
+@import "@primer/primitives/dist/css/functional/themes/dark.css";
+@import "@primer/primitives/dist/css/functional/themes/dark-dimmed.css";
+@import "@primer/primitives/dist/css/functional/themes/light-high-contrast.css";
+@import "@primer/primitives/dist/css/functional/themes/dark-high-contrast.css";

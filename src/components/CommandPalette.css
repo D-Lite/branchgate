@@ -1,0 +1,80 @@
+.command-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 24px 24px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.command-palette {
+  width: min(560px, 100%);
+  padding: 0;
+  overflow: hidden;
+}
+
+.command-palette-input {
+  width: 100%;
+  padding: 14px 16px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font-size: 14px;
+  outline: none;
+}
+
+.command-palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.command-palette-empty {
+  padding: 16px;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+.command-palette-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.command-palette-item:hover,
+.command-palette-item-active {
+  background: var(--surface-2);
+}
+
+.command-palette-name {
+  font-weight: 500;
+}
+
+.command-palette-meta {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.command-palette-footer {
+  display: flex;
+  gap: 14px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+}
