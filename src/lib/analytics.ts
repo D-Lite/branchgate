@@ -9,6 +9,7 @@ const POSTHOG_HOST =
   "https://us.i.posthog.com";
 
 let initialized = false;
+let onlineListenerInstalled = false;
 
 export function isAnalyticsAvailable(): boolean {
   return Boolean(POSTHOG_KEY.trim());
@@ -22,8 +23,28 @@ async function handleFirstLaunch() {
     posthog.identify(incomingId);
   }
 
-  posthog.capture("app:launched");
+  await queueCapture("app:launched");
   await invoke("mark_first_launch_done");
+}
+
+async function flushQueuedEvents() {
+  if (!navigator.onLine) return;
+  try {
+    const sent = await invoke<number>("flush_analytics_events");
+    if (sent === 100) {
+      window.setTimeout(() => void flushQueuedEvents(), 250);
+    }
+  } catch {
+    // Events remain in SQLite and will be retried on the next online/startup signal.
+  }
+}
+
+function installOnlineRetry() {
+  if (onlineListenerInstalled) return;
+  window.addEventListener("online", () => {
+    void flushQueuedEvents();
+  });
+  onlineListenerInstalled = true;
 }
 
 export async function initAnalytics() {
@@ -48,6 +69,8 @@ export async function initAnalytics() {
   if (!optedIn) return;
 
   posthog.opt_in_capturing();
+  installOnlineRetry();
+  void flushQueuedEvents();
   await handleFirstLaunch();
 }
 
@@ -61,15 +84,31 @@ export async function setAnalyticsOptIn(enabled: boolean) {
 
   if (enabled) {
     posthog.opt_in_capturing();
+    installOnlineRetry();
+    void flushQueuedEvents();
     await handleFirstLaunch();
   } else {
     posthog.opt_out_capturing();
   }
 }
 
-function capture(event: string, properties?: Record<string, string | number | boolean>) {
+async function queueCapture(
+  event: string,
+  properties?: Record<string, string | number | boolean>,
+) {
   if (!initialized) return;
-  posthog.capture(event, properties);
+  await invoke("queue_analytics_event", {
+    distinctId: posthog.get_distinct_id(),
+    event,
+    properties: properties ?? {},
+  });
+  void flushQueuedEvents();
+}
+
+function capture(event: string, properties?: Record<string, string | number | boolean>) {
+  void queueCapture(event, properties).catch(() => {
+    // A database failure is non-fatal to the product flow.
+  });
 }
 
 export const track = {

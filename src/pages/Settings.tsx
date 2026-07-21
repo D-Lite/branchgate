@@ -126,8 +126,16 @@ export function SettingsPage({ appInfo, onDataChange, onReset }: SettingsPagePro
             <p className="settings-desc">Loading settings…</p>
           ) : (
             <>
-              {message && <div className="settings-flash">{message}</div>}
-              {error && <div className="settings-error">{error}</div>}
+              {message && (
+                <div className="settings-flash" role="status" aria-live="polite">
+                  {message}
+                </div>
+              )}
+              {error && (
+                <div className="settings-error" role="alert">
+                  {error}
+                </div>
+              )}
 
               {activeTab === "Accounts" && <AccountsTab />}
               {activeTab === "Repos" && (
@@ -138,6 +146,12 @@ export function SettingsPage({ appInfo, onDataChange, onReset }: SettingsPagePro
                     await runAction(
                       () => updateRepoSettings({ repoId, defaultMergeStrategy: strategy }),
                       "Repository settings saved",
+                    );
+                  }}
+                  onGitRuntimeUpdate={async (repoId, gitBackend, wslDistro) => {
+                    await runAction(
+                      () => updateRepoSettings({ repoId, gitBackend, wslDistro }),
+                      "Git runtime updated",
                     );
                   }}
                   onDisconnect={async (repoId) => {
@@ -298,11 +312,17 @@ function ReposTab({
   repos,
   busy,
   onRepoUpdate,
+  onGitRuntimeUpdate,
   onDisconnect,
 }: {
   repos: ConnectedRepo[];
   busy: boolean;
   onRepoUpdate: (repoId: number, strategy: MergeStrategy) => Promise<void>;
+  onGitRuntimeUpdate: (
+    repoId: number,
+    gitBackend: "auto" | "native" | "wsl",
+    wslDistro: string | null,
+  ) => Promise<void>;
   onDisconnect: (repoId: number) => Promise<void>;
 }) {
   return (
@@ -358,6 +378,44 @@ function ReposTab({
                     ))}
                   </select>
                 </label>
+
+                <label className="settings-field">
+                  <span>Git runtime</span>
+                  <select
+                    value={repo.gitBackend}
+                    disabled={busy}
+                    onChange={(event) => {
+                      const backend = event.target.value as "auto" | "native" | "wsl";
+                      void onGitRuntimeUpdate(
+                        repo.id,
+                        backend,
+                        backend === "wsl" ? (repo.wslDistro ?? "Ubuntu") : null,
+                      );
+                    }}
+                  >
+                    <option value="auto">Auto-detect</option>
+                    <option value="native">Native Git</option>
+                    <option value="wsl">Git inside WSL</option>
+                  </select>
+                </label>
+
+                {repo.gitBackend === "wsl" && (
+                  <label className="settings-field">
+                    <span>WSL distribution</span>
+                    <input
+                      type="text"
+                      defaultValue={repo.wslDistro ?? ""}
+                      placeholder="Ubuntu"
+                      disabled={busy}
+                      onBlur={(event) => {
+                        const distro = event.target.value.trim();
+                        if (distro && distro !== repo.wslDistro) {
+                          void onGitRuntimeUpdate(repo.id, "wsl", distro);
+                        }
+                      }}
+                    />
+                  </label>
+                )}
 
                 <button
                   type="button"
@@ -481,28 +539,60 @@ function EditorsTab({
   onDetect: () => Promise<void>;
   onPrefer: (editorId: number) => Promise<void>;
 }) {
+  const [detecting, setDetecting] = useState(false);
+  const [pendingEditorId, setPendingEditorId] = useState<number | null>(null);
+  const editorBusy = busy || detecting || pendingEditorId !== null;
+
+  const detect = async () => {
+    if (editorBusy) return;
+    setDetecting(true);
+    try {
+      await onDetect();
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const prefer = async (editorId: number) => {
+    if (editorBusy) return;
+    setPendingEditorId(editorId);
+    try {
+      await onPrefer(editorId);
+    } finally {
+      setPendingEditorId(null);
+    }
+  };
+
   return (
-    <>
+    <div aria-busy={editorBusy}>
       <h2>Editors</h2>
       <p className="settings-desc">
         Detected editors are used to open conflicted files during promotion runs.
       </p>
 
       <div className="settings-actions-row">
-        <button type="button" className="btn btn-ghost" disabled={busy} onClick={onDetect}>
-          Re-detect editors
+        <button type="button" className="btn btn-ghost" disabled={editorBusy} onClick={detect}>
+          {detecting ? "Detecting editors…" : "Re-detect editors"}
         </button>
       </div>
+
+      <p className="settings-live-region" role="status" aria-live="polite" aria-atomic="true">
+        {detecting
+          ? "Detecting installed editors"
+          : pendingEditorId !== null
+            ? "Updating preferred editor"
+            : ""}
+      </p>
 
       {editors.length === 0 ? (
         <div className="settings-empty">
           <p>No editors detected yet.</p>
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={onDetect}>
-            Detect editors
+          <button type="button" className="btn btn-primary" disabled={editorBusy} onClick={detect}>
+            {detecting ? "Detecting editors…" : "Detect editors"}
           </button>
         </div>
       ) : (
-        <ul className="settings-editor-list">
+        <ul className="settings-editor-list" aria-busy={editorBusy}>
           {editors.map((editor) => (
             <li key={editor.id} className="settings-editor-item">
               <label className="settings-editor-pick">
@@ -510,8 +600,8 @@ function EditorsTab({
                   type="radio"
                   name="preferred-editor"
                   checked={editor.isPreferred}
-                  disabled={busy}
-                  onChange={() => onPrefer(editor.id)}
+                  aria-disabled={editorBusy}
+                  onChange={() => prefer(editor.id)}
                 />
                 <span>
                   <strong>{editor.name}</strong>
@@ -526,7 +616,7 @@ function EditorsTab({
           ))}
         </ul>
       )}
-    </>
+    </div>
   );
 }
 

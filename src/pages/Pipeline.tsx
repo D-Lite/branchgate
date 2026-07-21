@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   abortPromotionRun,
   continuePromotionRun,
+  deletePipeline,
   formatRelativeTime,
   getActivePromotionRun,
   getPipelineChecklist,
   getPipelineSyncStatus,
   openConflictInEditor,
   openRepoInEditor,
+  refreshPromotionRun,
   shortSha,
   startPromotionRun,
   syncPipeline,
@@ -29,7 +31,7 @@ import {
 
 interface PipelinePageProps {
   pipelines: Pipeline[];
-  onPipelinesChange: () => void;
+  onPipelinesChange: () => void | Promise<void>;
 }
 
 type ModalStep = "none" | "confirm" | "running" | "result";
@@ -58,6 +60,7 @@ function statusToSyncInfo(
 
 export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps) {
   const { id } = useParams();
+  const navigate = useNavigate();
   const pipelineId = Number(id);
   const pipeline = pipelines.find((p) => p.id === pipelineId);
 
@@ -72,6 +75,11 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
   const [promoteError, setPromoteError] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<PromotionRunResult | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [runBusy, setRunBusy] = useState(false);
+  const [deletingPipeline, setDeletingPipeline] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletePipelineError, setDeletePipelineError] = useState<string | null>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
 
   const applySelection = useCallback(
     (rows: ChecklistItem[]) => {
@@ -113,6 +121,26 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
     }
   }, [pipelineId]);
 
+  const refreshConflict = useCallback(async (runId: number) => {
+    const result = await refreshPromotionRun(runId);
+    setActiveRun(result);
+    setRunResult((current) => current?.runId === runId ? result : current);
+    return result;
+  }, []);
+
+  useEffect(() => {
+    if (!activeRun || activeRun.status !== "failed") return;
+    const refresh = () => {
+      void refreshConflict(activeRun.runId).catch(() => {});
+    };
+    const interval = window.setInterval(refresh, 2500);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [activeRun?.runId, activeRun?.status, refreshConflict]);
+
   const runSync = useCallback(async () => {
     if (!pipelineId) return;
     setError(null);
@@ -134,6 +162,60 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
     setRunResult(null);
     setPromoteError(null);
   }, []);
+
+  const closeDeleteConfirm = useCallback(() => {
+    if (deletingPipeline) return;
+    setDeleteConfirmOpen(false);
+    setDeletePipelineError(null);
+  }, [deletingPipeline]);
+
+  useEffect(() => {
+    if (modalStep === "none" && !deleteConfirmOpen) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const modal = modalRef.current;
+    const focusable = () =>
+      [...(modal?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [])];
+    window.setTimeout(() => focusable()[0]?.focus(), 0);
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && deleteConfirmOpen && !deletingPipeline) {
+        event.preventDefault();
+        closeDeleteConfirm();
+        return;
+      }
+      if (event.key === "Escape" && modalStep !== "running" && !runBusy) {
+        event.preventDefault();
+        closeModal();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const elements = focusable();
+      if (elements.length === 0) return;
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, [
+    modalStep,
+    runBusy,
+    closeModal,
+    deleteConfirmOpen,
+    deletingPipeline,
+    closeDeleteConfirm,
+  ]);
 
   useEffect(() => {
     if (!pipelineId || !pipeline) return;
@@ -214,7 +296,9 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
         persistSelection(next, items);
       },
       closeOverlay: () => {
-        if (modalStep !== "none" && modalStep !== "running") {
+        if (deleteConfirmOpen && !deletingPipeline) {
+          closeDeleteConfirm();
+        } else if (modalStep !== "none" && modalStep !== "running") {
           closeModal();
         }
       },
@@ -229,10 +313,15 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
     modalStep,
     items,
     closeModal,
+    deleteConfirmOpen,
+    deletingPipeline,
+    closeDeleteConfirm,
     persistSelection,
   ]);
 
   const selectedItems = items.filter((i) => selected.has(i.prId));
+  const remainingConflictCount =
+    runResult?.items.reduce((count, item) => count + item.conflictFiles.length, 0) ?? 0;
 
   const recordPromotionResult = useCallback(
     (result: { status: string; items: { prId: number }[] }) => {
@@ -277,34 +366,62 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
 
   const handleAbort = useCallback(async () => {
     if (!runResult) return;
+    setRunBusy(true);
     try {
       await abortPromotionRun(runResult.runId);
+      closeModal();
+      setActiveRun(null);
+      try {
+        const summary = await syncPipeline(pipelineId);
+        setSyncInfo(summary);
+        await loadChecklist();
+        await loadActiveRun();
+        onPipelinesChange();
+      } catch (refreshError) {
+        setError(
+          `Run aborted, but the pipeline could not refresh: ${
+            refreshError instanceof Error ? refreshError.message : String(refreshError)
+          }`,
+        );
+      }
+    } catch (err) {
+      setPromoteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRunBusy(false);
+    }
+  }, [runResult, pipelineId, loadChecklist, loadActiveRun, onPipelinesChange, closeModal]);
+
+  const continueResolving = useCallback(async () => {
+    const currentRun = runResult ?? activeRun;
+    if (!currentRun) return;
+    setEditorError(null);
+    setPromoteError(null);
+    setRunBusy(true);
+    try {
+      const result = await continuePromotionRun(currentRun.runId);
+      setRunResult(result);
+      setActiveRun(result.status === "failed" ? result : null);
+      setModalStep("result");
+      recordPromotionResult(result);
       await loadChecklist();
       await loadActiveRun();
       onPipelinesChange();
-      closeModal();
-      setActiveRun(null);
-    } catch (err) {
-      setPromoteError(err instanceof Error ? err.message : String(err));
-    }
-  }, [runResult, loadChecklist, loadActiveRun, onPipelinesChange, closeModal]);
-
-  const continueResolving = useCallback(async () => {
-    if (!activeRun) return;
-    setEditorError(null);
-    setPromoteError(null);
-    try {
-      const result = await continuePromotionRun(activeRun.runId);
-      setRunResult(result);
-      setActiveRun(result);
-      setModalStep("result");
-      recordPromotionResult(result);
     } catch (err) {
       setPromoteError(err instanceof Error ? err.message : String(err));
       setModalStep("result");
-      setRunResult(activeRun);
+      await refreshConflict(currentRun.runId).catch(() => currentRun);
+    } finally {
+      setRunBusy(false);
     }
-  }, [activeRun, recordPromotionResult]);
+  }, [
+    runResult,
+    activeRun,
+    recordPromotionResult,
+    loadChecklist,
+    loadActiveRun,
+    onPipelinesChange,
+    refreshConflict,
+  ]);
 
   const handleOpenFile = useCallback(
     async (runId: number, filePath: string) => {
@@ -337,6 +454,37 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
       return next;
     });
   };
+
+  const deselectAll = useCallback(() => {
+    const next = new Set<number>();
+    setSelected(next);
+    persistSelection(next, items);
+  }, [items, persistSelection]);
+
+  const handleDeletePipeline = useCallback(async () => {
+    if (!pipeline || activeRun) return;
+    setDeletingPipeline(true);
+    setDeletePipelineError(null);
+    try {
+      await deletePipeline(pipelineId);
+      clearCachedSelection(pipelineId);
+      setDeleteConfirmOpen(false);
+      await onPipelinesChange();
+      navigate("/");
+    } catch (deleteError) {
+      setDeletePipelineError(
+        deleteError instanceof Error ? deleteError.message : String(deleteError),
+      );
+    } finally {
+      setDeletingPipeline(false);
+    }
+  }, [pipeline, activeRun, pipelineId, onPipelinesChange, navigate]);
+
+  const requestDeletePipeline = useCallback(() => {
+    if (activeRun) return;
+    setDeletePipelineError(null);
+    setDeleteConfirmOpen(true);
+  }, [activeRun]);
 
   const toggleExpanded = (prId: number) => {
     setExpanded((prev) => {
@@ -381,6 +529,15 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
         <div className="pipeline-actions">
           <button
             type="button"
+            className="btn btn-subtle pipeline-delete-btn"
+            disabled={deletingPipeline || Boolean(activeRun)}
+            title={activeRun ? "Abort the active promotion before deleting this pipeline" : undefined}
+            onClick={requestDeletePipeline}
+          >
+            {deletingPipeline ? "Deleting…" : "Delete pipeline"}
+          </button>
+          <button
+            type="button"
             className="btn btn-ghost"
             onClick={runSync}
             disabled={syncing || modalStep === "running"}
@@ -388,10 +545,20 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
             <span className={syncing ? "spin-icon" : ""}>↻</span>
             {syncing ? "Syncing…" : "Refresh"}
           </button>
+          {selected.size > 0 && (
+            <button
+              type="button"
+              className="btn btn-subtle"
+              disabled={modalStep === "running"}
+              onClick={deselectAll}
+            >
+              Deselect all
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-primary"
-            disabled={selected.size === 0 || modalStep === "running"}
+            disabled={selected.size === 0 || modalStep === "running" || Boolean(activeRun)}
             onClick={() => setModalStep("confirm")}
           >
             Promote selected ({selected.size})
@@ -405,22 +572,38 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
         {activeRun && modalStep === "none" && (
           <div className="active-run-banner">
             <div>
-              <strong className="mono">Conflict in progress</strong>
+              <strong className="mono">
+                {activeRun.recoverable ? "Conflict in progress" : "Promotion stopped"}
+              </strong>
               <p>
-                Promotion stopped on{" "}
-                <span className="mono">{activeRun.branchName}</span>
-                {activeRun.conflictPhase === "merge" ? (
-                  <> while merging into <span className="mono">{activeRun.targetBranch}</span></>
+                {activeRun.recoverable ? (
+                  <>
+                    Promotion stopped on <span className="mono">{activeRun.branchName}</span>
+                    {activeRun.conflictPhase === "merge" ? (
+                      <> while merging into <span className="mono">{activeRun.targetBranch}</span></>
+                    ) : (
+                      <> during cherry-pick</>
+                    )}
+                    . Resolve and stage the listed files, then continue the promotion here.
+                  </>
                 ) : (
-                  <> during cherry-pick</>
+                  <>Git could not apply one of the selected changes. Review the error, then abort and refresh the pipeline.</>
                 )}
-                . Pick up where you left off or abort the run.
               </p>
             </div>
             <div className="active-run-actions">
-              <button type="button" className="btn btn-primary" onClick={continueResolving}>
-                Continue resolving
-              </button>
+              {activeRun.recoverable && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setRunResult(activeRun);
+                    setModalStep("result");
+                  }}
+                >
+                  Resolve conflict
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-subtle"
@@ -507,18 +690,91 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
         )}
       </div>
 
+      {deleteConfirmOpen && (
+        <div className="modal-backdrop" onClick={closeDeleteConfirm}>
+          <div
+            ref={modalRef}
+            className="modal delete-pipeline-modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-pipeline-title"
+            aria-describedby="delete-pipeline-description"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="delete-pipeline-heading">
+              <span className="delete-pipeline-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M4 7h16M9 3h6l1 4H8l1-4Z" />
+                  <path d="m6 7 1 14h10l1-14M10 11v6M14 11v6" />
+                </svg>
+              </span>
+              <div>
+                <span className="delete-pipeline-kicker">Pipeline settings</span>
+                <h2 id="delete-pipeline-title">Delete this pipeline?</h2>
+              </div>
+            </div>
+
+            <div className="delete-pipeline-body">
+              <p className="modal-desc" id="delete-pipeline-description">
+                Branchgate will remove this pipeline from your workspace and stop syncing it.
+              </p>
+
+              <div className="delete-pipeline-summary">
+                <strong>{pipeline.name}</strong>
+                <span className="mono">
+                  {pipeline.sourceBranch} → {pipeline.targetBranch}
+                </span>
+              </div>
+
+              <p className="delete-pipeline-note">
+                <span aria-hidden="true">✓</span>
+                Promotion history stays available in History.
+              </p>
+
+              {deletePipelineError && (
+                <div className="delete-pipeline-error" role="alert">
+                  {deletePipelineError}
+                </div>
+              )}
+            </div>
+
+            <div className="delete-pipeline-actions">
+              <button
+                type="button"
+                className="btn btn-subtle"
+                disabled={deletingPipeline}
+                onClick={closeDeleteConfirm}
+              >
+                Keep pipeline
+              </button>
+              <button
+                type="button"
+                className="btn delete-pipeline-confirm"
+                disabled={deletingPipeline}
+                onClick={handleDeletePipeline}
+              >
+                {deletingPipeline ? "Deleting…" : "Delete pipeline"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {modalStep !== "none" && (
         <div className="modal-backdrop" onClick={modalStep === "running" ? undefined : closeModal}>
           <div
-            className="modal card"
+            ref={modalRef}
+            className={`modal card${modalStep === "result" ? " modal-result" : ""}`}
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
+            aria-labelledby="promotion-modal-title"
+            aria-describedby="promotion-modal-description"
           >
             {modalStep === "confirm" && (
               <>
-                <h2>Promote {selected.size} change{selected.size === 1 ? "" : "s"}?</h2>
-                <p className="modal-desc">
+                <h2 id="promotion-modal-title">Promote {selected.size} change{selected.size === 1 ? "" : "s"}?</h2>
+                <p className="modal-desc" id="promotion-modal-description">
                   Branchgate will cherry-pick the selected merges in order, merge them into{" "}
                   <span className="mono">{pipeline.targetBranch}</span>, and clean up the
                   temporary branch automatically.
@@ -548,8 +804,8 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
 
             {modalStep === "running" && (
               <>
-                <h2>Promoting changes…</h2>
-                <p className="modal-desc">
+                <h2 id="promotion-modal-title">Promoting changes…</h2>
+                <p className="modal-desc" id="promotion-modal-description">
                   Cherry-picking in order and merging onto{" "}
                   <span className="mono">{pipeline.targetBranch}</span>. This may take a moment.
                 </p>
@@ -558,43 +814,62 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
             )}
 
             {modalStep === "result" && runResult && (
-              <>
-                <h2>
+              <div className="modal-result-layout">
+                <h2 id="promotion-modal-title">
                   {runResult.status === "merged"
                     ? "Promotion complete"
-                    : "Conflict — needs a hand"}
+                    : runResult.recoverable
+                      ? "Conflict — needs a hand"
+                      : "Promotion stopped"}
                 </h2>
                 {runResult.status === "merged" ? (
-                  <p className="modal-desc">
+                  <p className="modal-desc" id="promotion-modal-description">
                     Merged {runResult.items.length} change
                     {runResult.items.length === 1 ? "" : "s"} onto{" "}
                     <span className="mono">{pipeline.targetBranch}</span>.
                   </p>
+                ) : runResult.recoverable ? (
+                  <div className="modal-desc conflict-guidance" id="promotion-modal-description">
+                    <p>
+                      Branchgate paused{" "}
+                      {runResult.conflictPhase === "merge" ? "the final merge" : "a cherry-pick"}{" "}
+                      on <span className="mono">
+                        {runResult.conflictPhase === "merge"
+                          ? runResult.targetBranch
+                          : runResult.branchName}
+                      </span>.
+                    </p>
+                    <ol>
+                      <li>Open the repository in your editor.</li>
+                      <li>Resolve every listed file and stage it with Git.</li>
+                      <li>Return here and choose Continue promotion.</li>
+                    </ol>
+                    <p className="conflict-live-status" aria-live="polite">
+                      {runResult.canContinue
+                        ? "All conflicts are staged. The promotion is ready to continue."
+                        : remainingConflictCount > 0
+                          ? `${remainingConflictCount} conflicted ${remainingConflictCount === 1 ? "file" : "files"} remaining.`
+                          : "Git is not ready to continue yet. Check the operation in your repository, then try again."}
+                    </p>
+                  </div>
                 ) : (
-                  <p className="modal-desc">
-                    Promotion stopped on a conflict. Resolve files below, then continue in git
-                    {runResult.conflictPhase === "merge" ? (
-                      <>
-                        {" "}on <span className="mono">{runResult.targetBranch}</span>
-                      </>
-                    ) : (
-                      <>
-                        {" "}on <span className="mono">{runResult.branchName}</span>
-                      </>
-                    )}
-                    , or abort to undo.
-                  </p>
+                  <div className="modal-desc" id="promotion-modal-description">
+                    Git could not apply one of the selected changes and did not enter conflict
+                    resolution. Review the error below, abort this run, then refresh the pipeline
+                    before trying again.
+                  </div>
                 )}
 
-                {editorError && <div className="pipeline-error">{editorError}</div>}
-                {promoteError && <div className="pipeline-error">{promoteError}</div>}
+                {editorError && <div className="pipeline-error" role="alert">{editorError}</div>}
+                {promoteError && <div className="pipeline-error" role="alert">{promoteError}</div>}
 
-                {runResult.status === "failed" && (
+                {runResult.status === "failed" && runResult.recoverable && (
                   <div className="modal-editor-actions">
                     <button
                       type="button"
                       className="btn btn-ghost"
                       onClick={() => handleOpenRepo(runResult.runId)}
+                      disabled={runBusy}
                     >
                       Open repo in {runResult.preferredEditor ?? "editor"}
                     </button>
@@ -606,6 +881,9 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
                     <li key={item.prId} className={`run-item run-item-${item.status}`}>
                       <span className="run-item-status mono">{item.status}</span>
                       <span className="run-item-title">{item.title}</span>
+                      {item.errorMessage && (
+                        <p className="run-item-error">{item.errorMessage}</p>
+                      )}
                       {item.conflictFiles.length > 0 && (
                         <ul className="conflict-files">
                           {item.conflictFiles.map((f) => (
@@ -626,17 +904,83 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
                   ))}
                 </ul>
 
-                <div className="modal-actions">
-                  {runResult.status === "failed" && (
-                    <button type="button" className="btn btn-subtle" onClick={handleAbort}>
+                {runResult.status === "failed" && runResult.recoverable ? (
+                  <div
+                    key="recovery-actions"
+                    className="modal-actions modal-actions-sticky recovery-actions"
+                  >
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-subtle recovery-abort"
+                        onClick={handleAbort}
+                        disabled={runBusy}
+                      >
+                        Abort run
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={runBusy}
+                        onClick={async () => {
+                          setRunBusy(true);
+                          setPromoteError(null);
+                          try {
+                            await refreshConflict(runResult.runId);
+                          } catch (err) {
+                            setPromoteError(err instanceof Error ? err.message : String(err));
+                          } finally {
+                            setRunBusy(false);
+                          }
+                        }}
+                      >
+                        {runBusy ? "Checking…" : "Check again"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={continueResolving}
+                        disabled={!runResult.canContinue || runBusy}
+                      >
+                        {runBusy ? "Continuing…" : "Continue promotion"}
+                      </button>
+                    </>
+                    <button
+                      type="button"
+                      className="btn btn-subtle"
+                      onClick={closeModal}
+                      disabled={runBusy}
+                    >
+                      Close
+                    </button>
+                  </div>
+                ) : runResult.status === "failed" ? (
+                  <div key="failure-actions" className="modal-actions modal-actions-sticky">
+                    <button
+                      type="button"
+                      className="btn btn-subtle"
+                      onClick={handleAbort}
+                      disabled={runBusy}
+                    >
                       Abort run
                     </button>
-                  )}
-                  <button type="button" className="btn btn-primary" onClick={closeModal}>
-                    Done
-                  </button>
-                </div>
-              </>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={closeModal}
+                      disabled={runBusy}
+                    >
+                      Close
+                    </button>
+                  </div>
+                ) : (
+                  <div key="completion-actions" className="modal-actions modal-actions-sticky">
+                    <button type="button" className="btn btn-primary" onClick={closeModal}>
+                      Done
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

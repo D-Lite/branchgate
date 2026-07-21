@@ -22,6 +22,15 @@ pub async fn init(app: &AppHandle) -> AppResult<()> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    let repo_backends = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT local_path, git_backend, wsl_distro FROM repos WHERE local_path IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await?;
+    for (path, backend, distro) in repo_backends {
+        crate::git::runner::configure_repo_backend(&path, &backend, distro.as_deref());
+    }
+
     let _ = crate::settings::detect_editors(&pool).await;
 
     DB.set(pool)

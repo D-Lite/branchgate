@@ -54,6 +54,8 @@ pub struct UpdateRepoSettingsRequest {
     pub repo_id: i64,
     pub working_copy_mode: Option<String>,
     pub default_merge_strategy: Option<String>,
+    pub git_backend: Option<String>,
+    pub wsl_distro: Option<String>,
 }
 
 const KEY_NOTIFY_CONFLICT: &str = "notify_on_conflict";
@@ -110,7 +112,7 @@ pub async fn list_editors(pool: &SqlitePool) -> Result<Vec<EditorRow>, String> {
         r#"
         SELECT id, name, command, detected_path, is_preferred, last_verified_at
         FROM editors
-        ORDER BY is_preferred DESC, name ASC
+        ORDER BY name COLLATE NOCASE ASC, id ASC
         "#,
     )
     .fetch_all(pool)
@@ -168,9 +170,11 @@ pub async fn detect_editors(pool: &SqlitePool) -> Result<Vec<EditorRow>, String>
 }
 
 pub async fn set_preferred_editor(pool: &SqlitePool, editor_id: i64) -> Result<Vec<EditorRow>, String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
     let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM editors WHERE id = ?")
         .bind(editor_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -179,15 +183,17 @@ pub async fn set_preferred_editor(pool: &SqlitePool, editor_id: i64) -> Result<V
     }
 
     sqlx::query("UPDATE editors SET is_preferred = 0")
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     sqlx::query("UPDATE editors SET is_preferred = 1 WHERE id = ?")
         .bind(editor_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
 
     list_editors(pool).await
 }
@@ -219,6 +225,41 @@ pub async fn update_repo_settings(
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(ref backend) = request.git_backend {
+        if !matches!(backend.as_str(), "auto" | "native" | "wsl") {
+            return Err("Git runtime must be auto, native, or wsl".into());
+        }
+        let distro = request
+            .wsl_distro
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if backend == "wsl" && distro.is_none() {
+            return Err("Choose a WSL distribution when using WSL Git".into());
+        }
+        if let Some(distro) = distro.filter(|_| backend == "wsl") {
+            crate::git::runner::validate_wsl_distro(distro)?;
+        }
+
+        let local_path: Option<String> =
+            sqlx::query_scalar("SELECT local_path FROM repos WHERE id = ?")
+                .bind(request.repo_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?
+                .flatten();
+        let local_path = local_path.ok_or_else(|| "Repository not found".to_string())?;
+
+        sqlx::query("UPDATE repos SET git_backend = ?, wsl_distro = ? WHERE id = ?")
+            .bind(backend)
+            .bind(distro)
+            .bind(request.repo_id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::git::runner::configure_repo_backend(&local_path, backend, distro);
     }
 
     Ok(())

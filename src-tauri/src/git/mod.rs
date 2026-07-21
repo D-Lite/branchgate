@@ -1,5 +1,6 @@
 use std::path::Path;
-use std::process::{Command, Stdio};
+
+use runner::GitRunner;
 
 #[derive(Debug, Clone)]
 pub struct GitCommit {
@@ -22,8 +23,9 @@ pub fn ensure_git_repo(path: &Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err("Path is not a directory".into());
     }
-    if !path.join(".git").exists() {
-        return Err("Not a git repository — pick a folder that contains a .git directory".into());
+    let output = git(path, &["rev-parse", "--is-inside-work-tree"])?;
+    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "true" {
+        return Err("Not a Git working tree — choose a repository folder or subfolder".into());
     }
     Ok(())
 }
@@ -155,7 +157,7 @@ pub fn patch_id(path: &Path, sha: &str) -> Result<String, String> {
     };
 
     if show_output.status.success() {
-        if let Some(patch) = patch_id_from_bytes(&show_output.stdout) {
+        if let Some(patch) = patch_id_from_bytes(path, &show_output.stdout) {
             return Ok(patch);
         }
     }
@@ -166,7 +168,7 @@ pub fn patch_id(path: &Path, sha: &str) -> Result<String, String> {
         git(path, &["diff-tree", "-p", &format!("{sha}^!")])?
     };
     if tree_output.status.success() {
-        if let Some(patch) = patch_id_from_bytes(&tree_output.stdout) {
+        if let Some(patch) = patch_id_from_bytes(path, &tree_output.stdout) {
             return Ok(patch);
         }
     }
@@ -175,26 +177,14 @@ pub fn patch_id(path: &Path, sha: &str) -> Result<String, String> {
     Ok(format!("sha:{sha}"))
 }
 
-fn patch_id_from_bytes(diff: &[u8]) -> Option<String> {
+fn patch_id_from_bytes(path: &Path, diff: &[u8]) -> Option<String> {
     if diff.is_empty() {
         return None;
     }
 
-    let mut child = Command::new("git")
-        .args(["patch-id", "--stable"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
+    let output = GitRunner::for_repo(path)
+        .output_with_input(["patch-id", "--stable"], diff)
         .ok()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        if stdin.write_all(diff).is_err() {
-            return None;
-        }
-    }
-
-    let output = child.wait_with_output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -289,18 +279,12 @@ pub fn diff_vs_target(
 }
 
 pub mod promote;
+pub mod runner;
 
 fn git(path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| "Invalid path encoding".to_string())?;
-
-    Command::new("git")
-        .arg("-C")
-        .arg(path_str)
-        .args(args)
-        .output()
-        .map_err(|e| format!("Failed to run git — is it installed and on PATH? {e}"))
+    GitRunner::for_repo(path)
+        .output(args)
+        .map_err(|e| format!("{e} — install Git for Windows or enable WSL Git for this repository"))
 }
 
 #[cfg(test)]

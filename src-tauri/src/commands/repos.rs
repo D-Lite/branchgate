@@ -111,6 +111,8 @@ pub async fn list_connected_repos() -> Result<Vec<ConnectedRepo>, String> {
             r.working_copy_mode,
             r.default_branch,
             r.default_merge_strategy,
+            r.git_backend,
+            r.wsl_distro,
             r.created_at,
             COALESCE((
                 SELECT COUNT(*) FROM pipelines p
@@ -137,6 +139,8 @@ pub struct ConnectedRepo {
     pub working_copy_mode: String,
     pub default_branch: Option<String>,
     pub default_merge_strategy: String,
+    pub git_backend: String,
+    pub wsl_distro: Option<String>,
     pub created_at: i64,
     pub pipeline_count: i64,
 }
@@ -213,6 +217,10 @@ async fn create_pipeline(
         r#"
         INSERT INTO pipelines (repo_id, name, source_branch, target_branch, created_at)
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(repo_id, source_branch, target_branch) DO UPDATE SET
+            name = excluded.name,
+            active = 1,
+            created_at = excluded.created_at
         RETURNING id
         "#,
     )
@@ -235,6 +243,10 @@ async fn create_pipeline(
         r#"
         INSERT INTO branch_sync_state (pipeline_id, source_head_sha, target_head_sha, last_synced_at)
         VALUES (?, NULL, NULL, NULL)
+        ON CONFLICT(pipeline_id) DO UPDATE SET
+            source_head_sha = NULL,
+            target_head_sha = NULL,
+            last_synced_at = NULL
         "#,
     )
     .bind(pipeline_id)

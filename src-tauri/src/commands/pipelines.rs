@@ -53,6 +53,34 @@ pub async fn pipeline_count() -> Result<i64, String> {
     Ok(count)
 }
 
+#[tauri::command]
+pub async fn delete_pipeline(pipeline_id: i64) -> Result<(), String> {
+    let pool = crate::db::pool().map_err(|e| e.to_string())?;
+    let active_run_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM promotion_runs WHERE pipeline_id = ? AND status IN ('running', 'failed')",
+    )
+    .bind(pipeline_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if active_run_count > 0 {
+        return Err("Abort the active promotion before deleting this pipeline".into());
+    }
+
+    let result = sqlx::query("UPDATE pipelines SET active = 0 WHERE id = ? AND active = 1")
+        .bind(pipeline_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if result.rows_affected() == 0 {
+        return Err("Pipeline not found or already deleted".into());
+    }
+
+    Ok(())
+}
+
 pub async fn fetch_pipeline_row(
     pool: &sqlx::SqlitePool,
     pipeline_id: i64,

@@ -1,6 +1,6 @@
 [package]
 name = "branchgate"
-version = "0.1.0"
+version = "0.1.1"
 description = "Selectively promote merged PRs between branches"
 authors = ["Daniel Olabemiwo"]
 edition = "2021"

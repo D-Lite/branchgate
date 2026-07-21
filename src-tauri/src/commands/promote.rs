@@ -26,6 +26,14 @@ pub async fn continue_promotion_run(
     run_id: i64,
 ) -> Result<crate::promote::PromotionRunResult, String> {
     let pool = crate::db::pool().map_err(|e| e.to_string())?;
+    crate::promote::continue_promotion_run(pool, run_id).await
+}
+
+#[tauri::command]
+pub async fn refresh_promotion_run(
+    run_id: i64,
+) -> Result<crate::promote::PromotionRunResult, String> {
+    let pool = crate::db::pool().map_err(|e| e.to_string())?;
     crate::promote::prepare_conflict_resolution(pool, run_id).await
 }
 

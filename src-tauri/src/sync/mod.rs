@@ -1,4 +1,5 @@
 use crate::git;
+use std::collections::HashSet;
 
 mod local;
 
@@ -76,6 +77,41 @@ pub async fn sync_pipeline(pool: &SqlitePool, pipeline_id: i64) -> Result<SyncSu
         let pr_id = upsert_pull_request(&mut tx, ctx.repo_id, unit, &ctx.source_branch).await?;
         upsert_pr_commits(&mut tx, pr_id, unit).await?;
         upsert_promotion(&mut tx, pipeline_id, pr_id, status, on_target, now).await?;
+    }
+
+    let current_shas: HashSet<&str> = units
+        .iter()
+        .map(|unit| unit.merge_commit_sha.as_str())
+        .collect();
+    let pending_rows = sqlx::query_as::<_, (i64, String)>(
+        r#"
+        SELECT pm.pr_id, pr.merge_commit_sha
+        FROM promotions pm
+        JOIN pull_requests pr ON pr.id = pm.pr_id
+        WHERE pm.pipeline_id = ? AND pm.status = 'pending'
+        "#,
+    )
+    .bind(pipeline_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    for (pr_id, merge_commit_sha) in pending_rows {
+        if !current_shas.contains(merge_commit_sha.as_str()) {
+            sqlx::query(
+                r#"
+                UPDATE promotions
+                SET status = 'skipped',
+                    error_message = 'Source history changed; refresh selected the current commits'
+                WHERE pipeline_id = ? AND pr_id = ? AND status = 'pending'
+                "#,
+            )
+            .bind(pipeline_id)
+            .bind(pr_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+        }
     }
 
     sqlx::query(

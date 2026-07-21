@@ -33,3 +33,19 @@ pub fn get_pending_distinct_id(
     let pool = crate::db::pool().map_err(|e| e.to_string())?;
     tauri::async_runtime::block_on(crate::analytics::pending_distinct_id(&pool, &state))
 }
+
+#[tauri::command]
+pub async fn queue_analytics_event(
+    distinct_id: String,
+    event: String,
+    properties: serde_json::Value,
+) -> Result<(), String> {
+    let pool = crate::db::pool().map_err(|error| error.to_string())?;
+    crate::analytics::queue_event(pool, &distinct_id, &event, properties).await
+}
+
+#[tauri::command]
+pub async fn flush_analytics_events() -> Result<u64, String> {
+    let pool = crate::db::pool().map_err(|error| error.to_string())?;
+    crate::analytics::flush_events(pool).await
+}

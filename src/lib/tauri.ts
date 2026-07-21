@@ -25,6 +25,8 @@ export interface ConnectedRepo {
   workingCopyMode: string;
   defaultBranch: string | null;
   defaultMergeStrategy: string;
+  gitBackend: "auto" | "native" | "wsl";
+  wslDistro: string | null;
   createdAt: number;
   pipelineCount: number;
 }
@@ -116,6 +118,10 @@ export async function listPipelines(): Promise<Pipeline[]> {
   return invoke<Pipeline[]>("list_pipelines");
 }
 
+export async function deletePipeline(pipelineId: number): Promise<void> {
+  return invoke("delete_pipeline", { pipelineId });
+}
+
 export async function listConnectedRepos(): Promise<ConnectedRepo[]> {
   return invoke<ConnectedRepo[]>("list_connected_repos");
 }
@@ -163,6 +169,8 @@ export interface PromotionRunResult {
   status: string;
   items: PromotionRunItem[];
   preferredEditor: string | null;
+  canContinue: boolean;
+  recoverable: boolean;
 }
 
 export async function startPromotionRun(
@@ -186,6 +194,12 @@ export async function continuePromotionRun(
   runId: number,
 ): Promise<PromotionRunResult> {
   return invoke<PromotionRunResult>("continue_promotion_run", { runId });
+}
+
+export async function refreshPromotionRun(
+  runId: number,
+): Promise<PromotionRunResult> {
+  return invoke<PromotionRunResult>("refresh_promotion_run", { runId });
 }
 
 export async function openConflictInEditor(
@@ -250,6 +264,8 @@ export async function updateRepoSettings(request: {
   repoId: number;
   workingCopyMode?: string;
   defaultMergeStrategy?: MergeStrategy;
+  gitBackend?: "auto" | "native" | "wsl";
+  wslDistro?: string | null;
 }): Promise<void> {
   return invoke<void>("update_repo_settings", { request });
 }

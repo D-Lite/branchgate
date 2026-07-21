@@ -1,6 +1,12 @@
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[derive(Debug, Clone)]
 pub struct DetectedEditor {
     pub name: String,
@@ -44,6 +50,13 @@ pub fn detect() -> Vec<DetectedEditor> {
         }
     }
 
+    found.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
     found
 }
 
@@ -58,16 +71,31 @@ const CLI_EDITORS: &[(&str, &str)] = &[
 
 #[cfg(target_os = "macos")]
 const MAC_APP_EDITORS: &[(&str, &str, &str)] = &[
-    ("VS Code", "Visual Studio Code", "open -a 'Visual Studio Code'"),
+    (
+        "VS Code",
+        "Visual Studio Code",
+        "open -a 'Visual Studio Code'",
+    ),
     ("Cursor", "Cursor", "open -a Cursor"),
     ("Zed", "Zed", "open -a Zed"),
 ];
 
 fn resolve_cli(command: &str) -> Option<String> {
     #[cfg(windows)]
-    let output = Command::new("where").arg(command).output().ok()?;
+    let mut lookup = {
+        let mut command_lookup = Command::new("where");
+        command_lookup.arg(command);
+        suppress_console_window(&mut command_lookup);
+        command_lookup
+    };
     #[cfg(not(windows))]
-    let output = Command::new("which").arg(command).output().ok()?;
+    let mut lookup = {
+        let mut command_lookup = Command::new("which");
+        command_lookup.arg(command);
+        command_lookup
+    };
+
+    let output = lookup.output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -86,35 +114,87 @@ fn resolve_cli(command: &str) -> Option<String> {
     }
 }
 
-pub fn open_file(editor_command: &str, file_path: &Path) -> Result<(), String> {
+pub fn open_file_with_path(
+    editor_command: &str,
+    detected_path: Option<&str>,
+    file_path: &Path,
+) -> Result<(), String> {
     if !file_path.exists() {
         return Err(format!("File not found: {}", file_path.display()));
     }
 
-    let path_str = file_path
-        .to_str()
-        .ok_or_else(|| "Invalid file path encoding".to_string())?;
-
-    let status = if editor_command.starts_with("open ") {
-        Command::new("sh")
-            .arg("-lc")
-            .arg(format!("{editor_command} -- {path_str}"))
-            .status()
+    let (mut command, is_gui) = if let Some(app_name) = macos_app_name(editor_command) {
+        let mut command = Command::new("open");
+        command.arg("-a").arg(app_name).arg("--").arg(file_path);
+        (command, true)
     } else {
-        Command::new(editor_command).arg(path_str).status()
-    }
-    .map_err(|e| format!("Failed to launch editor: {e}"))?;
+        let executable = detected_path
+            .filter(|path| {
+                let lower = path.to_ascii_lowercase();
+                !lower.ends_with(".cmd") && !lower.ends_with(".bat")
+            })
+            .map(str::to_string)
+            .or_else(|| resolve_cli(editor_command))
+            .unwrap_or_else(|| editor_command.to_string());
+        let mut command = Command::new(executable);
+        command.arg(file_path);
+        let is_gui = is_gui_editor(editor_command);
+        if is_gui {
+            suppress_console_window(&mut command);
+        }
+        (command, is_gui)
+    };
 
-    if status.success() {
+    if is_gui {
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("Failed to launch editor: {e}"))?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         Ok(())
     } else {
-        Err(format!(
-            "Editor exited with status {}",
-            status.code().unwrap_or(-1)
-        ))
+        let status = command
+            .status()
+            .map_err(|e| format!("Failed to launch editor: {e}"))?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Editor exited with status {}",
+                status.code().unwrap_or(-1)
+            ))
+        }
     }
 }
 
-pub fn open_repo(editor_command: &str, repo_path: &Path) -> Result<(), String> {
-    open_file(editor_command, repo_path)
+pub fn open_repo_with_path(
+    editor_command: &str,
+    detected_path: Option<&str>,
+    repo_path: &Path,
+) -> Result<(), String> {
+    open_file_with_path(editor_command, detected_path, repo_path)
+}
+
+fn macos_app_name(editor_command: &str) -> Option<&str> {
+    let app_name = editor_command.strip_prefix("open -a ")?.trim();
+    let app_name = app_name
+        .strip_prefix('\'')
+        .and_then(|name| name.strip_suffix('\''))
+        .unwrap_or(app_name);
+
+    (!app_name.is_empty()).then_some(app_name)
+}
+
+fn is_gui_editor(editor_command: &str) -> bool {
+    matches!(editor_command, "code" | "cursor" | "zed" | "subl")
+}
+
+fn suppress_console_window(command: &mut Command) {
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    #[cfg(not(windows))]
+    let _ = command;
 }

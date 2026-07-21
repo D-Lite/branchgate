@@ -71,6 +71,18 @@
   font-size: 13px;
 }
 
+.settings-live-region {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .settings-subhead {
   margin: 24px 0 10px;
   font-size: 12px;
@@ -282,7 +294,7 @@
 
 .settings-repo-controls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   align-items: end;
 }
@@ -294,7 +306,8 @@
   color: var(--fg-muted);
 }
 
-.settings-field select {
+.settings-field select,
+.settings-field input {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border);
@@ -302,6 +315,10 @@
   background: var(--surface);
   color: var(--fg);
   font-size: 13px;
+}
+
+.settings-repo-controls > .settings-danger-btn {
+  justify-self: start;
 }
 
 .settings-danger-btn {
@@ -353,13 +370,27 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .settings-editor-pick {
   flex: 1;
+  min-width: min(260px, 100%);
   border: none;
   background: transparent;
   padding: 0;
+}
+
+.settings-editor-pick > span {
+  min-width: 0;
+}
+
+.settings-editor-pick input {
+  flex: 0 0 auto;
+}
+
+.settings-editor-meta {
+  overflow-wrap: anywhere;
 }
 
 .settings-path-row {

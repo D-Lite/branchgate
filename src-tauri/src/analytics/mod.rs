@@ -1,7 +1,7 @@
 use serde_json::{json, Map, Value};
 use sqlx::SqlitePool;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager};
 
 const KEY_SHARE_USAGE: &str = "share_anonymous_usage";
 const KEY_FIRST_LAUNCH: &str = "analytics_first_launch_done";
@@ -9,6 +9,7 @@ const KEY_PENDING_DISTINCT_ID: &str = "pending_distinct_id";
 
 const POSTHOG_HOST: &str = "https://us.i.posthog.com";
 const POSTHOG_KEY: &str = "phc_BskG7i7BSi7VRhgLoLrCfW5eDaKwGWLXoP9sQCwzLUrd";
+static FLUSH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Default)]
 pub struct AnalyticsState {
@@ -36,7 +37,115 @@ pub async fn get_opt_in(pool: &SqlitePool) -> Result<bool, String> {
 }
 
 pub async fn set_opt_in(pool: &SqlitePool, enabled: bool) -> Result<(), String> {
-    set_bool(pool, KEY_SHARE_USAGE, enabled).await
+    set_bool(pool, KEY_SHARE_USAGE, enabled).await?;
+    if !enabled {
+        sqlx::query("DELETE FROM analytics_queue")
+            .execute(pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+pub async fn queue_event(
+    pool: &SqlitePool,
+    distinct_id: &str,
+    event: &str,
+    properties: Value,
+) -> Result<(), String> {
+    if !get_opt_in(pool).await? {
+        return Ok(());
+    }
+    if distinct_id.trim().is_empty() || event.trim().is_empty() {
+        return Err("Analytics event and distinct ID are required".into());
+    }
+
+    let properties = properties.as_object().cloned().unwrap_or_default();
+    sqlx::query(
+        r#"
+        INSERT INTO analytics_queue (distinct_id, event, properties_json, created_at)
+        VALUES (?, ?, ?, ?)
+        "#,
+    )
+    .bind(distinct_id)
+    .bind(event)
+    .bind(Value::Object(properties).to_string())
+    .bind(chrono::Utc::now().timestamp())
+    .execute(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM analytics_queue
+        WHERE id IN (
+            SELECT id FROM analytics_queue
+            ORDER BY created_at DESC, id DESC
+            LIMIT -1 OFFSET 10000
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub async fn flush_events(pool: &SqlitePool) -> Result<u64, String> {
+    let _guard = FLUSH_LOCK.lock().await;
+    if !get_opt_in(pool).await? {
+        return Ok(0);
+    }
+
+    let rows = sqlx::query_as::<_, (i64, String, String, String)>(
+        r#"
+        SELECT id, distinct_id, event, properties_json
+        FROM analytics_queue
+        ORDER BY created_at ASC, id ASC
+        LIMIT 100
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let mut sent = 0;
+    for (id, distinct_id, event, properties_json) in rows {
+        let properties = serde_json::from_str::<Value>(&properties_json)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        match capture_event(
+            &distinct_id,
+            "desktop_app",
+            &event,
+            properties,
+            true,
+        )
+        .await
+        {
+            Ok(()) => {
+                sqlx::query("DELETE FROM analytics_queue WHERE id = ?")
+                    .bind(id)
+                    .execute(pool)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                sent += 1;
+            }
+            Err(error) => {
+                sqlx::query(
+                    "UPDATE analytics_queue SET attempts = attempts + 1, last_error = ? WHERE id = ?",
+                )
+                .bind(error.to_string())
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(|db_error| db_error.to_string())?;
+                break;
+            }
+        }
+    }
+    Ok(sent)
 }
 
 pub async fn is_first_launch_done(pool: &SqlitePool) -> Result<bool, String> {
@@ -87,7 +196,8 @@ pub async fn capture_event(
             "properties": properties,
         }))
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
     Ok(())
 }
 
