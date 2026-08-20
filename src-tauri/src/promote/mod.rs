@@ -1069,7 +1069,9 @@ async fn build_run_result(
             .collect();
 
         let item_status = if status == "conflict" {
-            if row.conflict_phase.is_some() {
+            if conflict_files.is_empty() && row.conflict_phase.is_some() {
+                "resolved"
+            } else if row.conflict_phase.is_some() {
                 "conflict"
             } else {
                 "failed"
@@ -1079,14 +1081,15 @@ async fn build_run_result(
         } else {
             "queued"
         };
+        let ready = item_status == "resolved";
 
         items.push(PromotionRunItem {
             pr_id,
             title,
             merge_commit_sha,
             status: item_status.into(),
-            error_message,
-            conflict_files,
+            error_message: if ready { None } else { error_message },
+            conflict_files: if ready { Vec::new() } else { conflict_files },
         });
     }
 

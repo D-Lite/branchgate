@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.2 — 2026-08-20
+
+This release makes pipeline setup less brittle and keeps large repositories usable while they sync.
+
+### Highlights
+
+- Target branch selection can create a new local branch during pipeline setup, without switching your current checkout.
+- Pipeline sync now loads commits in pages so the top of the list appears before the full history finishes scanning.
+- The branch list on the connect flow stays current if you create a branch after opening BranchGate.
+
+### Changed
+
+- Syncing a pipeline streams checklist rows as each page lands, with progress in the header.
+- Repeat syncs skip commits that are already indexed, so later refreshes stay closer to new activity.
+
+### Fixed
+
+- Fixed newly created branches missing from the source and target dropdowns until the connect flow was restarted.
+- Fixed Check again enabling Continue promotion while the conflicted files and conflict state stayed on screen after they were resolved and staged.
+
+### Upgrade notes
+
+- Restart Branchgate after upgrading so the new Tauri commands are loaded.
+
 ## 0.1.1 — 2026-07-21
 
 This release makes promotion recovery substantially safer and improves Branchgate's Windows desktop experience.

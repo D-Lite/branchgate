@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::git::{self, DiffStats};
+use crate::git::{self, DiffStats, GitCommit};
 
 #[derive(Debug, Clone)]
 pub struct LogicalUnit {
@@ -14,37 +14,39 @@ pub struct LogicalUnit {
     pub _diff: DiffStats,
 }
 
-pub fn discover_units(
-    path: &Path,
-    source: &str,
-    target: &str,
-    target_head: &str,
-) -> Result<Vec<LogicalUnit>, String> {
-    let commits = git::commits_ahead(path, source, target)?;
-    let mut units = Vec::new();
+pub fn units_from_commits(commits: Vec<GitCommit>) -> Vec<LogicalUnit> {
+    commits.into_iter().map(unit_from_commit).collect()
+}
 
-    for commit in commits {
-        let strategy = if commit.parent_count > 1 {
-            "merge"
-        } else {
-            "squash"
-        };
-        let patch = git::patch_id(path, &commit.sha)?;
-        let diff = git::diff_vs_target(path, target_head, &commit.sha)?;
-
-        units.push(LogicalUnit {
-            merge_commit_sha: commit.sha.clone(),
-            title: commit.subject,
-            author: commit.author,
-            merged_at: commit.authored_at,
-            merge_strategy: strategy,
-            commit_shas: vec![commit.sha],
-            patch_ids: vec![patch],
-            _diff: diff,
-        });
+pub fn unit_from_commit(commit: GitCommit) -> LogicalUnit {
+    let strategy = if commit.parent_count > 1 {
+        "merge"
+    } else {
+        "squash"
+    };
+    LogicalUnit {
+        merge_commit_sha: commit.sha.clone(),
+        title: commit.subject,
+        author: commit.author,
+        merged_at: commit.authored_at,
+        merge_strategy: strategy,
+        commit_shas: vec![commit.sha],
+        patch_ids: Vec::new(),
+        _diff: DiffStats {
+            files_changed: 0,
+            insertions: 0,
+            deletions: 0,
+            changed_files: Vec::new(),
+        },
     }
+}
 
-    Ok(units)
+pub fn enrich_unit(path: &Path, unit: &mut LogicalUnit, target_head: &str) -> Result<(), String> {
+    let patch = git::patch_id(path, &unit.merge_commit_sha)?;
+    let diff = git::diff_vs_target(path, target_head, &unit.merge_commit_sha)?;
+    unit.patch_ids = vec![patch];
+    unit._diff = diff;
+    Ok(())
 }
 
 pub fn parse_ticket_ref(title: &str) -> Option<String> {

@@ -1,7 +1,15 @@
+use tauri::{AppHandle, Emitter};
+
 #[tauri::command]
-pub async fn sync_pipeline(pipeline_id: i64) -> Result<crate::sync::SyncSummary, String> {
+pub async fn sync_pipeline(
+    app: AppHandle,
+    pipeline_id: i64,
+) -> Result<crate::sync::SyncSummary, String> {
     let pool = crate::db::pool().map_err(|e| e.to_string())?;
-    crate::sync::sync_pipeline(pool, pipeline_id).await
+    crate::sync::sync_pipeline_with_progress(pool, pipeline_id, |progress| {
+        let _ = app.emit("pipeline-sync-progress", &progress);
+    })
+    .await
 }
 
 #[tauri::command]

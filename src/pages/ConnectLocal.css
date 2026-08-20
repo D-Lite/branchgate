@@ -136,6 +136,20 @@
   margin-top: 8px;
 }
 
+.create-branch-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.create-branch-panel .field {
+  margin-bottom: 0;
+}
+
 .existing-repos {
   display: flex;
   flex-direction: column;
@@ -172,7 +186,8 @@
 }
 
 @media (max-width: 640px) {
-  .field-row {
+  .field-row,
+  .create-branch-panel {
     grid-template-columns: 1fr;
   }
 }

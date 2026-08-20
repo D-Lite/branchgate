@@ -23,6 +23,9 @@ pub struct ConnectLocalRequest {
     pub source_branch: String,
     pub target_branch: String,
     pub repo_id: Option<i64>,
+    #[serde(default)]
+    pub create_target_branch: bool,
+    pub target_base_branch: Option<String>,
 }
 
 #[tauri::command]
@@ -63,6 +66,16 @@ pub async fn connect_local_repo(request: ConnectLocalRequest) -> Result<Pipeline
 
     let path = Path::new(&request.local_path);
     git::ensure_git_repo(path)?;
+    if request.create_target_branch {
+        let branches = git::list_branches(path)?;
+        if !branches.iter().any(|branch| branch == &request.target_branch) {
+            let base = request
+                .target_base_branch
+                .as_deref()
+                .unwrap_or(&request.source_branch);
+            git::create_branch_ref(path, &request.target_branch, base)?;
+        }
+    }
     validate_branches(path, &request.source_branch, &request.target_branch)?;
 
     let pool = crate::db::pool().map_err(|e| e.to_string())?;

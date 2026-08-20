@@ -74,6 +74,8 @@ export interface ConnectLocalRequest {
   sourceBranch: string;
   targetBranch: string;
   repoId?: number | null;
+  createTargetBranch?: boolean;
+  targetBaseBranch?: string | null;
 }
 
 export interface SyncSummary {
@@ -84,6 +86,15 @@ export interface SyncSummary {
   pendingCount: number;
   promotedCount: number;
   syncedAt: number;
+}
+
+export interface SyncProgress {
+  pipelineId: number;
+  loadedCount: number;
+  totalCount: number;
+  pendingCount: number;
+  promotedCount: number;
+  done: boolean;
 }
 
 export interface PipelineSyncStatus {

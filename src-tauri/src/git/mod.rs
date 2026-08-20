@@ -78,6 +78,45 @@ pub fn list_branches(path: &Path) -> Result<Vec<String>, String> {
     Ok(branches)
 }
 
+/// Create a local branch at `base` without switching the current checkout.
+pub fn create_branch_ref(path: &Path, branch: &str, base: &str) -> Result<(), String> {
+    let name = branch.trim();
+    if name.is_empty() {
+        return Err("Branch name is required".into());
+    }
+
+    let format = git(path, &["check-ref-format", "--branch", name])?;
+    if !format.status.success() {
+        return Err(format!("'{name}' is not a valid Git branch name"));
+    }
+
+    let normalized = String::from_utf8_lossy(&format.stdout)
+        .trim()
+        .to_string();
+    let branch_name = if normalized.is_empty() {
+        name.to_string()
+    } else {
+        normalized
+    };
+
+    let existing = list_branches(path)?;
+    if existing.iter().any(|candidate| candidate == &branch_name) {
+        return Err(format!("Branch '{branch_name}' already exists"));
+    }
+    if !existing.iter().any(|candidate| candidate == base) {
+        return Err(format!("Base branch '{base}' not found"));
+    }
+
+    let output = git(path, &["branch", "--", &branch_name, base])?;
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to create branch {branch_name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 pub fn branch_head(path: &Path, branch: &str) -> Result<String, String> {
     let output = git(path, &["rev-parse", &format!("refs/heads/{branch}")])?;
     if !output.status.success() {
@@ -87,6 +126,7 @@ pub fn branch_head(path: &Path, branch: &str) -> Result<String, String> {
 }
 
 /// Commits on source's first-parent line that are not reachable from target.
+/// Oldest commits come first so the checklist can fill from the top.
 pub fn commits_ahead(path: &Path, source: &str, target: &str) -> Result<Vec<GitCommit>, String> {
     let range = format!("{target}..{source}");
     let output = git(
@@ -95,7 +135,7 @@ pub fn commits_ahead(path: &Path, source: &str, target: &str) -> Result<Vec<GitC
             "log",
             "--first-parent",
             "--reverse",
-            &format!("--format=%H\x1f%s\x1f%an\x1f%at"),
+            "--format=%H\x1f%s\x1f%an\x1f%at\x1f%P",
             &range,
         ],
     )?;
@@ -105,8 +145,12 @@ pub fn commits_ahead(path: &Path, source: &str, target: &str) -> Result<Vec<GitC
         return Err(format!("Failed to read commit history: {stderr}"));
     }
 
+    Ok(parse_commit_lines(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_commit_lines(stdout: &str) -> Vec<GitCommit> {
     let mut commits = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -115,7 +159,11 @@ pub fn commits_ahead(path: &Path, source: &str, target: &str) -> Result<Vec<GitC
         if parts.len() < 4 {
             continue;
         }
-        let parent_count = parent_count(path, parts[0])?;
+        let parent_count = parts
+            .get(4)
+            .map(|parents| parents.split_whitespace().count())
+            .unwrap_or(0)
+            .max(1);
         commits.push(GitCommit {
             sha: parts[0].to_string(),
             subject: parts[1].to_string(),
@@ -124,17 +172,7 @@ pub fn commits_ahead(path: &Path, source: &str, target: &str) -> Result<Vec<GitC
             parent_count,
         });
     }
-    Ok(commits)
-}
-
-pub fn parent_count(path: &Path, sha: &str) -> Result<usize, String> {
-    let output = git(path, &["rev-list", "--parents", "-n", "1", sha])?;
-    if !output.status.success() {
-        return Ok(1);
-    }
-    let line = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<_> = line.split_whitespace().collect();
-    Ok(parts.len().saturating_sub(1).max(1))
+    commits
 }
 
 fn is_merge_commit(path: &Path, sha: &str) -> bool {
@@ -338,6 +376,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn parse_commit_lines_reads_parent_hashes() {
+        let stdout = "abc\x1fMerge PR\x1fAda\x1f1700000000\x1fparent1 parent2\n\
+                      def\x1fSquash\x1fAda\x1f1700000001\x1fparent1\n";
+        let commits = parse_commit_lines(stdout);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].parent_count, 2);
+        assert_eq!(commits[1].parent_count, 1);
+        assert_eq!(commits[0].subject, "Merge PR");
+    }
+
+    #[test]
+    fn create_branch_ref_leaves_current_checkout() {
+        let repo = unique_temp_repo();
+        init_temp_repo(&repo);
+        let before = current_branch(&repo).unwrap();
+        create_branch_ref(&repo, "release/next", "main").expect("create branch");
+        let after = current_branch(&repo).unwrap();
+        assert_eq!(before, after);
+        let branches = list_branches(&repo).unwrap();
+        assert!(branches.iter().any(|branch| branch == "release/next"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    fn unique_temp_repo() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!(
+                "create-branch-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+    }
+
+    fn init_temp_repo(repo: &std::path::Path) {
+        std::fs::create_dir_all(repo).unwrap();
+        assert!(git(repo, &["init", "-b", "main"]).unwrap().status.success());
+        git(repo, &["config", "user.email", "test@example.com"]).unwrap();
+        git(repo, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(repo.join("README.md"), "ok").unwrap();
+        assert!(git(repo, &["add", "README.md"]).unwrap().status.success());
+        assert!(
+            git(repo, &["commit", "-m", "init"])
+                .unwrap()
+                .status
+                .success()
+        );
     }
 
     #[test]

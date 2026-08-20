@@ -6,7 +6,9 @@ mod local;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-use local::{discover_units, parse_ticket_ref, LogicalUnit};
+use local::{enrich_unit, parse_ticket_ref, units_from_commits, LogicalUnit};
+
+const SYNC_PAGE_SIZE: usize = 20;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,6 +22,17 @@ pub struct SyncSummary {
     pub synced_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub pipeline_id: i64,
+    pub loaded_count: usize,
+    pub total_count: usize,
+    pub pending_count: usize,
+    pub promoted_count: usize,
+    pub done: bool,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct PipelineContext {
     repo_id: i64,
@@ -29,7 +42,14 @@ struct PipelineContext {
     kind: String,
 }
 
-pub async fn sync_pipeline(pool: &SqlitePool, pipeline_id: i64) -> Result<SyncSummary, String> {
+pub async fn sync_pipeline_with_progress<F>(
+    pool: &SqlitePool,
+    pipeline_id: i64,
+    mut on_progress: F,
+) -> Result<SyncSummary, String>
+where
+    F: FnMut(SyncProgress) + Send,
+{
     let ctx = sqlx::query_as::<_, PipelineContext>(
         r#"
         SELECT p.repo_id, p.source_branch, p.target_branch, r.local_path, r.kind
@@ -56,33 +76,200 @@ pub async fn sync_pipeline(pool: &SqlitePool, pipeline_id: i64) -> Result<SyncSu
 
     let source_head = git::branch_head(path, &ctx.source_branch)?;
     let target_head = git::branch_head(path, &ctx.target_branch)?;
-    let cherry = git::cherry_on_target(path, &ctx.target_branch, &ctx.source_branch)?;
-    let units = discover_units(path, &ctx.source_branch, &ctx.target_branch, &target_head)?;
+    let commits = git::commits_ahead(path, &ctx.source_branch, &ctx.target_branch)?;
+    let mut units = units_from_commits(commits);
+    let total_count = units.len();
 
+    let previously_known = known_merge_shas(pool, ctx.repo_id).await?;
     let now = chrono::Utc::now().timestamp();
-    let mut pending = 0usize;
-    let mut promoted = 0usize;
 
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    emit_progress(
+        &mut on_progress,
+        pipeline_id,
+        0,
+        total_count,
+        0,
+        0,
+        false,
+    );
 
-    for unit in &units {
-        let on_target = cherry.get(&unit.merge_commit_sha).copied().unwrap_or(false);
-        let status = if on_target { "promoted" } else { "pending" };
-        if on_target {
-            promoted += 1;
-        } else {
-            pending += 1;
+    let mut loaded_count = 0usize;
+    for page in units.chunks(SYNC_PAGE_SIZE) {
+        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+        for unit in page {
+            let pr_id =
+                upsert_pull_request(&mut tx, ctx.repo_id, unit, &ctx.source_branch, false).await?;
+            upsert_promotion(&mut tx, pipeline_id, pr_id, false, now).await?;
         }
+        tx.commit().await.map_err(|e| e.to_string())?;
+        loaded_count += page.len();
+        let (pending_count, promoted_count) = promotion_counts(pool, pipeline_id).await?;
+        emit_progress(
+            &mut on_progress,
+            pipeline_id,
+            loaded_count,
+            total_count,
+            pending_count,
+            promoted_count,
+            false,
+        );
+        tokio::task::yield_now().await;
+    }
 
-        let pr_id = upsert_pull_request(&mut tx, ctx.repo_id, unit, &ctx.source_branch).await?;
-        upsert_pr_commits(&mut tx, pr_id, unit).await?;
-        upsert_promotion(&mut tx, pipeline_id, pr_id, status, on_target, now).await?;
+    let cherry = git::cherry_on_target(path, &ctx.target_branch, &ctx.source_branch)?;
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    for unit in &units {
+        let on_target = cherry
+            .get(&unit.merge_commit_sha)
+            .copied()
+            .unwrap_or(false);
+        let pr_id = upsert_pull_request(&mut tx, ctx.repo_id, unit, &ctx.source_branch, false).await?;
+        upsert_promotion(&mut tx, pipeline_id, pr_id, on_target, now).await?;
     }
 
     let current_shas: HashSet<&str> = units
         .iter()
         .map(|unit| unit.merge_commit_sha.as_str())
         .collect();
+    skip_stale_pending(&mut tx, pipeline_id, &current_shas).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    let (pending_count, promoted_count) = promotion_counts(pool, pipeline_id).await?;
+    emit_progress(
+        &mut on_progress,
+        pipeline_id,
+        loaded_count,
+        total_count,
+        pending_count,
+        promoted_count,
+        false,
+    );
+
+    for page in units.chunks_mut(SYNC_PAGE_SIZE) {
+        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+        for unit in page.iter_mut() {
+            if previously_known.contains(&unit.merge_commit_sha) {
+                continue;
+            }
+            enrich_unit(path, unit, &target_head)?;
+            let pr_id =
+                upsert_pull_request(&mut tx, ctx.repo_id, unit, &ctx.source_branch, true).await?;
+            upsert_pr_commits(&mut tx, pr_id, unit).await?;
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
+        let (pending_count, promoted_count) = promotion_counts(pool, pipeline_id).await?;
+        emit_progress(
+            &mut on_progress,
+            pipeline_id,
+            loaded_count,
+            total_count,
+            pending_count,
+            promoted_count,
+            false,
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let (pending_count, promoted_count) = promotion_counts(pool, pipeline_id).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO branch_sync_state (pipeline_id, source_head_sha, target_head_sha, last_synced_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(pipeline_id) DO UPDATE SET
+            source_head_sha = excluded.source_head_sha,
+            target_head_sha = excluded.target_head_sha,
+            last_synced_at = excluded.last_synced_at
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(&source_head)
+    .bind(&target_head)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    emit_progress(
+        &mut on_progress,
+        pipeline_id,
+        total_count,
+        total_count,
+        pending_count,
+        promoted_count,
+        true,
+    );
+
+    Ok(SyncSummary {
+        pipeline_id,
+        source_head,
+        target_head,
+        units_found: units.len(),
+        pending_count,
+        promoted_count,
+        synced_at: now,
+    })
+}
+
+fn emit_progress<F: FnMut(SyncProgress)>(
+    on_progress: &mut F,
+    pipeline_id: i64,
+    loaded_count: usize,
+    total_count: usize,
+    pending_count: usize,
+    promoted_count: usize,
+    done: bool,
+) {
+    on_progress(SyncProgress {
+        pipeline_id,
+        loaded_count,
+        total_count,
+        pending_count,
+        promoted_count,
+        done,
+    });
+}
+
+async fn known_merge_shas(pool: &SqlitePool, repo_id: i64) -> Result<HashSet<String>, String> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT pr.merge_commit_sha
+        FROM pull_requests pr
+        WHERE pr.repo_id = ?
+          AND EXISTS (SELECT 1 FROM pr_commits pc WHERE pc.pr_id = pr.id)
+        "#,
+    )
+    .bind(repo_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().collect())
+}
+
+async fn promotion_counts(pool: &SqlitePool, pipeline_id: i64) -> Result<(usize, usize), String> {
+    let counts = sqlx::query_as::<_, StatusCounts>(
+        r#"
+        SELECT
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+            SUM(CASE WHEN status = 'promoted' THEN 1 ELSE 0 END) AS promoted_count
+        FROM promotions
+        WHERE pipeline_id = ?
+        "#,
+    )
+    .bind(pipeline_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok((
+        counts.pending_count.unwrap_or(0) as usize,
+        counts.promoted_count.unwrap_or(0) as usize,
+    ))
+}
+
+async fn skip_stale_pending(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    pipeline_id: i64,
+    current_shas: &HashSet<&str>,
+) -> Result<(), String> {
     let pending_rows = sqlx::query_as::<_, (i64, String)>(
         r#"
         SELECT pm.pr_id, pr.merge_commit_sha
@@ -92,7 +279,7 @@ pub async fn sync_pipeline(pool: &SqlitePool, pipeline_id: i64) -> Result<SyncSu
         "#,
     )
     .bind(pipeline_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .map_err(|error| error.to_string())?;
 
@@ -108,41 +295,12 @@ pub async fn sync_pipeline(pool: &SqlitePool, pipeline_id: i64) -> Result<SyncSu
             )
             .bind(pipeline_id)
             .bind(pr_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| error.to_string())?;
         }
     }
-
-    sqlx::query(
-        r#"
-        INSERT INTO branch_sync_state (pipeline_id, source_head_sha, target_head_sha, last_synced_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(pipeline_id) DO UPDATE SET
-            source_head_sha = excluded.source_head_sha,
-            target_head_sha = excluded.target_head_sha,
-            last_synced_at = excluded.last_synced_at
-        "#,
-    )
-    .bind(pipeline_id)
-    .bind(&source_head)
-    .bind(&target_head)
-    .bind(now)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    tx.commit().await.map_err(|e| e.to_string())?;
-
-    Ok(SyncSummary {
-        pipeline_id,
-        source_head,
-        target_head,
-        units_found: units.len(),
-        pending_count: pending,
-        promoted_count: promoted,
-        synced_at: now,
-    })
+    Ok(())
 }
 
 async fn upsert_pull_request(
@@ -150,6 +308,7 @@ async fn upsert_pull_request(
     repo_id: i64,
     unit: &LogicalUnit,
     base_branch: &str,
+    write_details: bool,
 ) -> Result<i64, String> {
     let ticket_ref = parse_ticket_ref(&unit.title);
     let changed_files_json =
@@ -167,29 +326,50 @@ async fn upsert_pull_request(
     .await
     .map_err(|e| e.to_string())?
     {
-        sqlx::query(
-            r#"
-            UPDATE pull_requests
-            SET title = ?, author = ?, base_branch = ?, merge_strategy = ?,
-                ticket_ref = ?, merged_at = ?,
-                files_changed = ?, insertions = ?, deletions = ?, changed_files_json = ?
-            WHERE id = ?
-            "#,
-        )
-        .bind(&unit.title)
-        .bind(&unit.author)
-        .bind(base_branch)
-        .bind(unit.merge_strategy)
-        .bind(&ticket_ref)
-        .bind(unit.merged_at)
-        .bind(files_changed)
-        .bind(insertions)
-        .bind(deletions)
-        .bind(&changed_files_json)
-        .bind(existing)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
+        if write_details {
+            sqlx::query(
+                r#"
+                UPDATE pull_requests
+                SET title = ?, author = ?, base_branch = ?, merge_strategy = ?,
+                    ticket_ref = ?, merged_at = ?,
+                    files_changed = ?, insertions = ?, deletions = ?, changed_files_json = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(&unit.title)
+            .bind(&unit.author)
+            .bind(base_branch)
+            .bind(unit.merge_strategy)
+            .bind(&ticket_ref)
+            .bind(unit.merged_at)
+            .bind(files_changed)
+            .bind(insertions)
+            .bind(deletions)
+            .bind(&changed_files_json)
+            .bind(existing)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE pull_requests
+                SET title = ?, author = ?, base_branch = ?, merge_strategy = ?,
+                    ticket_ref = ?, merged_at = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(&unit.title)
+            .bind(&unit.author)
+            .bind(base_branch)
+            .bind(unit.merge_strategy)
+            .bind(&ticket_ref)
+            .bind(unit.merged_at)
+            .bind(existing)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
         return Ok(existing);
     }
 
@@ -228,6 +408,9 @@ async fn upsert_pr_commits(
     pr_id: i64,
     unit: &LogicalUnit,
 ) -> Result<(), String> {
+    if unit.patch_ids.is_empty() {
+        return Ok(());
+    }
     for (sha, patch) in unit.commit_shas.iter().zip(unit.patch_ids.iter()) {
         sqlx::query(
             r#"
@@ -251,7 +434,6 @@ async fn upsert_promotion(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     pipeline_id: i64,
     pr_id: i64,
-    status: &str,
     on_target: bool,
     now: i64,
 ) -> Result<(), String> {
@@ -308,7 +490,6 @@ async fn upsert_promotion(
         .map_err(|e| e.to_string())?;
     }
 
-    let _ = status;
     Ok(())
 }
 

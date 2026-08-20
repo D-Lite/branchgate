@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -19,6 +19,8 @@ interface ConnectLocalProps {
 
 type Step = "pick" | "configure";
 
+const CREATE_TARGET = "__branchgate_create__";
+
 export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>("pick");
@@ -29,9 +31,14 @@ export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
   const [selectedRepoId, setSelectedRepoId] = useState<number | null>(null);
   const [sourceBranch, setSourceBranch] = useState("");
   const [targetBranch, setTargetBranch] = useState("");
+  const [newBranchName, setNewBranchName] = useState("");
+  const [newBranchBase, setNewBranchBase] = useState("");
   const [pipelineName, setPipelineName] = useState("");
+  const autoNameRef = useRef("");
 
   const stepLabel = step === "pick" ? "Step 1 of 2" : "Step 2 of 2";
+  const creatingTarget = targetBranch === CREATE_TARGET;
+  const effectiveTarget = creatingTarget ? newBranchName.trim() : targetBranch;
   const branchOptions = useMemo(() => repo?.branches ?? [], [repo]);
 
   useEffect(() => {
@@ -40,18 +47,88 @@ export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
       .catch(() => setExistingRepos([]));
   }, []);
 
-  const loadRepo = useCallback(async (path: string, repoId?: number | null) => {
-    const info = await inspectLocalRepo(path);
-    const suggested = suggestBranches(info.branches);
-    setRepo(info);
-    setSelectedRepoId(repoId ?? info.existingRepoId);
-    setSourceBranch(suggested.source);
-    setTargetBranch(suggested.target);
-    setPipelineName(
-      defaultPipelineName(info.name, suggested.source, suggested.target),
-    );
-    setStep("configure");
-  }, []);
+  const applyGeneratedName = useCallback(
+    (repoName: string, source: string, target: string) => {
+      if (!target) return;
+      const generated = defaultPipelineName(repoName, source, target);
+      setPipelineName((current) => {
+        if (!current || current === autoNameRef.current) {
+          autoNameRef.current = generated;
+          return generated;
+        }
+        return current;
+      });
+    },
+    [],
+  );
+
+  const loadRepo = useCallback(
+    async (path: string, repoId?: number | null) => {
+      const info = await inspectLocalRepo(path);
+      const suggested = suggestBranches(info.branches);
+      setRepo(info);
+      setSelectedRepoId(repoId ?? info.existingRepoId);
+      setSourceBranch(suggested.source);
+      setTargetBranch(suggested.target);
+      setNewBranchName("");
+      setNewBranchBase(suggested.source);
+      const generated = defaultPipelineName(
+        info.name,
+        suggested.source,
+        suggested.target,
+      );
+      autoNameRef.current = generated;
+      setPipelineName(generated);
+      setStep("configure");
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!repo || step !== "configure") return;
+    let cancelled = false;
+
+    const refreshBranches = async () => {
+      try {
+        const info = await inspectLocalRepo(repo.path);
+        if (cancelled) return;
+        setRepo((current) => {
+          if (!current) return current;
+          const same =
+            current.branches.length === info.branches.length &&
+            current.branches.every((branch, index) => branch === info.branches[index]);
+          if (same) return current;
+          return { ...current, branches: info.branches };
+        });
+      } catch {
+        // Keep the last known list if Git is briefly unavailable.
+      }
+    };
+
+    const onFocus = () => {
+      void refreshBranches();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") onFocus();
+    };
+
+    void refreshBranches();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    const interval = window.setInterval(onFocus, 2500);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.clearInterval(interval);
+    };
+  }, [repo?.path, step]);
+
+  useEffect(() => {
+    if (!repo || !sourceBranch || !effectiveTarget) return;
+    applyGeneratedName(repo.name, sourceBranch, effectiveTarget);
+  }, [repo, sourceBranch, effectiveTarget, applyGeneratedName]);
 
   const pickFolder = useCallback(async () => {
     setError(null);
@@ -88,7 +165,7 @@ export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
   );
 
   const submit = useCallback(async () => {
-    if (!repo) return;
+    if (!repo || !effectiveTarget) return;
     setError(null);
     setLoading(true);
     try {
@@ -96,8 +173,12 @@ export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
         localPath: repo.path,
         pipelineName: pipelineName.trim(),
         sourceBranch,
-        targetBranch,
+        targetBranch: effectiveTarget,
         repoId: selectedRepoId,
+        createTargetBranch: creatingTarget,
+        targetBaseBranch: creatingTarget
+          ? newBranchBase || sourceBranch
+          : undefined,
       });
       track.pipelineCreated();
       onSuccess();
@@ -111,8 +192,10 @@ export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
     repo,
     pipelineName,
     sourceBranch,
-    targetBranch,
+    effectiveTarget,
     selectedRepoId,
+    creatingTarget,
+    newBranchBase,
     onSuccess,
     navigate,
   ]);
@@ -225,7 +308,13 @@ export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
                   id="source-branch"
                   className="field-select mono"
                   value={sourceBranch}
-                  onChange={(e) => setSourceBranch(e.target.value)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setSourceBranch(next);
+                    if (creatingTarget && (!newBranchBase || newBranchBase === sourceBranch)) {
+                      setNewBranchBase(next);
+                    }
+                  }}
                 >
                   {branchOptions.map((branch) => (
                     <option key={branch} value={branch}>
@@ -244,17 +333,64 @@ export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
                   id="target-branch"
                   className="field-select mono"
                   value={targetBranch}
-                  onChange={(e) => setTargetBranch(e.target.value)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setTargetBranch(next);
+                    if (next === CREATE_TARGET) {
+                      setNewBranchBase((current) => current || sourceBranch);
+                    }
+                  }}
                 >
                   {branchOptions.map((branch) => (
                     <option key={branch} value={branch}>
                       {branch}
                     </option>
                   ))}
+                  <option value={CREATE_TARGET}>Create new branch…</option>
                 </select>
-                <span className="field-hint">Promote selected changes here</span>
+                <span className="field-hint">
+                  {creatingTarget
+                    ? "Creates a local branch without switching your checkout"
+                    : "Promote selected changes here"}
+                </span>
               </div>
             </div>
+
+            {creatingTarget && (
+              <div className="create-branch-panel">
+                <div className="field">
+                  <label className="field-label" htmlFor="new-branch-name">
+                    New branch name
+                  </label>
+                  <input
+                    id="new-branch-name"
+                    className="field-input mono"
+                    value={newBranchName}
+                    onChange={(e) => setNewBranchName(e.target.value)}
+                    placeholder="release/next"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="new-branch-base">
+                    Create from
+                  </label>
+                  <select
+                    id="new-branch-base"
+                    className="field-select mono"
+                    value={newBranchBase || sourceBranch}
+                    onChange={(e) => setNewBranchBase(e.target.value)}
+                  >
+                    {branchOptions.map((branch) => (
+                      <option key={branch} value={branch}>
+                        {branch}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
 
             <div className="connect-actions">
               <button
@@ -265,8 +401,8 @@ export function ConnectLocal({ onSuccess }: ConnectLocalProps) {
                   loading ||
                   !pipelineName.trim() ||
                   !sourceBranch ||
-                  !targetBranch ||
-                  sourceBranch === targetBranch
+                  !effectiveTarget ||
+                  sourceBranch === effectiveTarget
                 }
               >
                 {loading ? "Creating…" : "Create pipeline"}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import {
   abortPromotionRun,
   continuePromotionRun,
@@ -17,6 +18,7 @@ import {
   type ChecklistItem,
   type Pipeline,
   type PromotionRunResult,
+  type SyncProgress,
   type SyncSummary,
 } from "../lib/tauri";
 import { useShortcutActions } from "../hooks/useShortcutActions";
@@ -68,6 +70,7 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [syncInfo, setSyncInfo] = useState<SyncSummary | null>(null);
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modalStep, setModalStep] = useState<ModalStep>("none");
@@ -80,6 +83,7 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletePipelineError, setDeletePipelineError] = useState<string | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+  const syncGeneration = useRef(0);
 
   const applySelection = useCallback(
     (rows: ChecklistItem[]) => {
@@ -141,21 +145,47 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
     };
   }, [activeRun?.runId, activeRun?.status, refreshConflict]);
 
-  const runSync = useCallback(async () => {
+  const runSync = useCallback(async (cancelled?: () => boolean) => {
     if (!pipelineId) return;
+    const generation = ++syncGeneration.current;
+    const isCancelled = () =>
+      (typeof cancelled === "function" ? cancelled() : false) ||
+      syncGeneration.current !== generation;
     setError(null);
     setSyncing(true);
+    setSyncProgress(null);
+    const unlisten = await listen<SyncProgress>("pipeline-sync-progress", (event) => {
+      if (event.payload.pipelineId !== pipelineId || isCancelled()) return;
+      setSyncProgress(event.payload);
+      void getPipelineChecklist(pipelineId)
+        .then((rows) => {
+          if (isCancelled()) return;
+          setItems(rows);
+          applySelection(rows);
+        })
+        .catch(() => {});
+    });
     try {
       const summary = await syncPipeline(pipelineId);
+      if (isCancelled()) return;
       setSyncInfo(summary);
-      await loadChecklist();
+      const rows = await getPipelineChecklist(pipelineId);
+      if (isCancelled()) return;
+      setItems(rows);
+      applySelection(rows);
       onPipelinesChange();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (!isCancelled()) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setSyncing(false);
+      unlisten();
+      if (syncGeneration.current === generation) {
+        setSyncing(false);
+        setSyncProgress(null);
+      }
     }
-  }, [pipelineId, loadChecklist, onPipelinesChange]);
+  }, [pipelineId, applySelection, onPipelinesChange]);
 
   const closeModal = useCallback(() => {
     setModalStep("none");
@@ -226,6 +256,8 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
     setSelected(new Set());
     setExpanded(new Set());
     setSyncInfo(null);
+    setSyncProgress(null);
+    setSyncing(false);
     setError(null);
 
     (async () => {
@@ -242,24 +274,8 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
         void loadActiveRun();
 
         if (status.needsSync) {
-          setSyncing(true);
-          try {
-            const summary = await syncPipeline(pipelineId);
-            if (cancelled) return;
-            setSyncInfo(summary);
-            const updated = await getPipelineChecklist(pipelineId);
-            if (cancelled) return;
-            setItems(updated);
-            applySelection(updated);
-            onPipelinesChange();
-            void loadActiveRun();
-          } catch (err) {
-            if (!cancelled) {
-              setError(err instanceof Error ? err.message : String(err));
-            }
-          } finally {
-            if (!cancelled) setSyncing(false);
-          }
+          await runSync(() => cancelled);
+          if (!cancelled) void loadActiveRun();
         }
       } catch (err) {
         if (!cancelled) {
@@ -270,8 +286,9 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
 
     return () => {
       cancelled = true;
+      syncGeneration.current += 1;
     };
-  }, [pipelineId, pipeline, onPipelinesChange, applySelection, loadActiveRun]);
+  }, [pipelineId, pipeline, applySelection, loadActiveRun, runSync]);
 
   const { register, unregister } = useShortcutActions();
   const pendingItems = items.filter((i) => i.status === "pending");
@@ -322,6 +339,11 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
   const selectedItems = items.filter((i) => selected.has(i.prId));
   const remainingConflictCount =
     runResult?.items.reduce((count, item) => count + item.conflictFiles.length, 0) ?? 0;
+  const syncLabel = syncing
+    ? syncProgress && syncProgress.totalCount > 0
+      ? `Syncing ${syncProgress.loadedCount} of ${syncProgress.totalCount}…`
+      : "Syncing…"
+    : "Refresh";
 
   const recordPromotionResult = useCallback(
     (result: { status: string; items: { prId: number }[] }) => {
@@ -372,11 +394,8 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
       closeModal();
       setActiveRun(null);
       try {
-        const summary = await syncPipeline(pipelineId);
-        setSyncInfo(summary);
-        await loadChecklist();
+        await runSync();
         await loadActiveRun();
-        onPipelinesChange();
       } catch (refreshError) {
         setError(
           `Run aborted, but the pipeline could not refresh: ${
@@ -389,7 +408,7 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
     } finally {
       setRunBusy(false);
     }
-  }, [runResult, pipelineId, loadChecklist, loadActiveRun, onPipelinesChange, closeModal]);
+  }, [runResult, runSync, loadActiveRun, closeModal]);
 
   const continueResolving = useCallback(async () => {
     const currentRun = runResult ?? activeRun;
@@ -519,11 +538,24 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
             {pipeline.sourceBranch} → {pipeline.targetBranch}
             {pipeline.repoName && <> · {pipeline.repoName}</>}
           </p>
-          {syncInfo && (
+          {syncing && syncProgress && syncProgress.totalCount > 0 ? (
             <p className="sync-meta mono">
-              Synced {formatRelativeTime(syncInfo.syncedAt)} ·{" "}
-              {syncInfo.pendingCount} pending · {syncInfo.promotedCount} promoted
+              Loading {syncProgress.loadedCount} of {syncProgress.totalCount} commits
+              {(syncProgress.pendingCount > 0 || syncProgress.promotedCount > 0) && (
+                <>
+                  {" "}
+                  · {syncProgress.pendingCount} pending · {syncProgress.promotedCount}{" "}
+                  promoted
+                </>
+              )}
             </p>
+          ) : (
+            syncInfo && (
+              <p className="sync-meta mono">
+                Synced {formatRelativeTime(syncInfo.syncedAt)} ·{" "}
+                {syncInfo.pendingCount} pending · {syncInfo.promotedCount} promoted
+              </p>
+            )
           )}
         </div>
         <div className="pipeline-actions">
@@ -539,11 +571,11 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
           <button
             type="button"
             className="btn btn-ghost"
-            onClick={runSync}
+            onClick={() => void runSync()}
             disabled={syncing || modalStep === "running"}
           >
             <span className={syncing ? "spin-icon" : ""}>↻</span>
-            {syncing ? "Syncing…" : "Refresh"}
+            {syncLabel}
           </button>
           {selected.size > 0 && (
             <button
@@ -558,7 +590,7 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
           <button
             type="button"
             className="btn btn-primary"
-            disabled={selected.size === 0 || modalStep === "running" || Boolean(activeRun)}
+            disabled={selected.size === 0 || modalStep === "running" || Boolean(activeRun) || syncing}
             onClick={() => setModalStep("confirm")}
           >
             Promote selected ({selected.size})
@@ -573,19 +605,30 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
           <div className="active-run-banner">
             <div>
               <strong className="mono">
-                {activeRun.recoverable ? "Conflict in progress" : "Promotion stopped"}
+                {activeRun.recoverable
+                  ? activeRun.canContinue
+                    ? "Ready to continue"
+                    : "Conflict in progress"
+                  : "Promotion stopped"}
               </strong>
               <p>
                 {activeRun.recoverable ? (
-                  <>
-                    Promotion stopped on <span className="mono">{activeRun.branchName}</span>
-                    {activeRun.conflictPhase === "merge" ? (
-                      <> while merging into <span className="mono">{activeRun.targetBranch}</span></>
-                    ) : (
-                      <> during cherry-pick</>
-                    )}
-                    . Resolve and stage the listed files, then continue the promotion here.
-                  </>
+                  activeRun.canContinue ? (
+                    <>
+                      All conflicts are resolved and staged. Continue the promotion to finish
+                      merging onto <span className="mono">{activeRun.targetBranch}</span>.
+                    </>
+                  ) : (
+                    <>
+                      Promotion stopped on <span className="mono">{activeRun.branchName}</span>
+                      {activeRun.conflictPhase === "merge" ? (
+                        <> while merging into <span className="mono">{activeRun.targetBranch}</span></>
+                      ) : (
+                        <> during cherry-pick</>
+                      )}
+                      . Resolve and stage the listed files, then continue the promotion here.
+                    </>
+                  )
                 ) : (
                   <>Git could not apply one of the selected changes. Review the error, then abort and refresh the pipeline.</>
                 )}
@@ -601,7 +644,7 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
                     setModalStep("result");
                   }}
                 >
-                  Resolve conflict
+                  {activeRun.canContinue ? "Continue promotion" : "Resolve conflict"}
                 </button>
               )}
               <button
@@ -630,11 +673,20 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
             <button
               type="button"
               className="btn btn-primary"
-              onClick={runSync}
+              onClick={() => void runSync()}
               disabled={syncing}
             >
-              {syncing ? "Syncing…" : "Refresh pipeline"}
+              Refresh pipeline
             </button>
+          </div>
+        ) : items.length === 0 && syncing ? (
+          <div className="empty-state">
+            <h2>Loading commits…</h2>
+            <p>
+              {syncProgress && syncProgress.totalCount > 0
+                ? `Showing the first commits as they land. ${syncProgress.loadedCount} of ${syncProgress.totalCount} loaded.`
+                : "Scanning the repository. Commits will appear at the top of the list as they load."}
+            </p>
           </div>
         ) : (
           <>
@@ -818,9 +870,11 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
                 <h2 id="promotion-modal-title">
                   {runResult.status === "merged"
                     ? "Promotion complete"
-                    : runResult.recoverable
-                      ? "Conflict — needs a hand"
-                      : "Promotion stopped"}
+                    : runResult.canContinue && runResult.recoverable
+                      ? "Conflicts resolved"
+                      : runResult.recoverable
+                        ? "Conflict — needs a hand"
+                        : "Promotion stopped"}
                 </h2>
                 {runResult.status === "merged" ? (
                   <p className="modal-desc" id="promotion-modal-description">
@@ -830,20 +884,30 @@ export function PipelinePage({ pipelines, onPipelinesChange }: PipelinePageProps
                   </p>
                 ) : runResult.recoverable ? (
                   <div className="modal-desc conflict-guidance" id="promotion-modal-description">
-                    <p>
-                      Branchgate paused{" "}
-                      {runResult.conflictPhase === "merge" ? "the final merge" : "a cherry-pick"}{" "}
-                      on <span className="mono">
-                        {runResult.conflictPhase === "merge"
-                          ? runResult.targetBranch
-                          : runResult.branchName}
-                      </span>.
-                    </p>
-                    <ol>
-                      <li>Open the repository in your editor.</li>
-                      <li>Resolve every listed file and stage it with Git.</li>
-                      <li>Return here and choose Continue promotion.</li>
-                    </ol>
+                    {runResult.canContinue ? (
+                      <p>
+                        All conflicted files are resolved and staged. Continue the promotion to
+                        finish merging onto{" "}
+                        <span className="mono">{runResult.targetBranch}</span>.
+                      </p>
+                    ) : (
+                      <>
+                        <p>
+                          Branchgate paused{" "}
+                          {runResult.conflictPhase === "merge" ? "the final merge" : "a cherry-pick"}{" "}
+                          on <span className="mono">
+                            {runResult.conflictPhase === "merge"
+                              ? runResult.targetBranch
+                              : runResult.branchName}
+                          </span>.
+                        </p>
+                        <ol>
+                          <li>Open the repository in your editor.</li>
+                          <li>Resolve every listed file and stage it with Git.</li>
+                          <li>Return here and choose Continue promotion.</li>
+                        </ol>
+                      </>
+                    )}
                     <p className="conflict-live-status" aria-live="polite">
                       {runResult.canContinue
                         ? "All conflicts are staged. The promotion is ready to continue."

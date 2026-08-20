@@ -440,7 +440,8 @@
   color: var(--fg-subtle);
 }
 
-.run-item-done .run-item-status {
+.run-item-done .run-item-status,
+.run-item-resolved .run-item-status {
   color: var(--success);
 }
 
